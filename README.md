@@ -3,6 +3,8 @@
 Grow a look by picking the picture you like, then save it as a LoRA. Works with any SDXL checkpoint
 (SDXL itself, Pony, Illustrious, NoobAI and their merges). No training, and no data that belongs to one checkpoint.
 
+https://github.com/user-attachments/assets/ec3d6ebf-ee75-4648-bbec-839cacb9da8c
+
 It plays like a card table. Each deal lays out the same prompt nine times (or four). Every picture plays a different
 **hand**: a few **cards**, each of which pushes some of the model's neurons up or down. Take the picture you like and
 the next deal grows from its hand. A hand you like cashes out as a small LoRA (about 30 kB) that ComfyUI loads like
