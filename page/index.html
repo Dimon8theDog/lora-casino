@@ -1,0 +1,1410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LoRA Casino</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* A card table at night: a wine-dark table, ivory cards with a thin gold edge, dark green card backs, amber for what
+   matters. Layout: the table on the left (dealt pictures over your hand and the controls), a rail on the right with a
+   panel that slides out of it. Fonts are the system's own (a serif for headings), so nothing is downloaded. */
+:root {
+  --ground: #230F14;     /* the table */
+  --rail: #1A0A0E;       /* rail */
+  --panel: #2A1218;      /* slide-out panel */
+  --card: #32161D;       /* picture tiles before they draw, empty states */
+  --field: #3A1A22;      /* text fields */
+  --raise: #3D1C25;      /* chips, rows, buttons */
+  --raise-2: #522833;    /* selected chip, pressed */
+  --tip: #45222B;        /* tooltips */
+  --kbd: #5E313C;
+  --text: #F4E9DA;
+  --text-2: #D8C2C0;
+  --text-3: #B89AA0;
+  --accent: #E8B04A;     /* amber: the one accent */
+  --accent-press: #C9922F;
+  --glow: #F3C56B;
+  --on-accent: #2B1B03;  /* text on amber */
+  --ivory: #F4E9DA;      /* card faces */
+  --ink: #2A1218;        /* text on a card face */
+  --ink-2: #7C5C62;
+  --suit-red: #A3262E;   /* an "up" card's emblem, like a red suit */
+  --back: #0F3B33;       /* card backs, and a "down" card's emblem */
+  --font-head: Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', serif;
+  --font-label: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --tile-ratio: 512 / 688;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--ground); color: var(--text); font: 400 14px/1.5 var(--font-body); overflow: hidden; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: 0.35; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+svg.i { width: 20px; height: 20px; flex: none; }
+.label { font: 500 10px/1 var(--font-label); letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-3); }
+.eyebrow { font: 600 10px/1 var(--font-label); letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes breathe { from { background: var(--card); } to { background: var(--raise); } }
+@keyframes padscan { 0% { transform: translateY(0); } 100% { transform: translateY(72px); } }
+@keyframes blink { 50% { opacity: 0; } }
+/* motion is on unless you turn it off in Tune (this PC tells browsers "reduce motion", but the moving parts are wanted here) */
+html.still *, html.still *::before, html.still *::after { animation: none !important; transition: none !important; }
+
+.app { display: flex; height: 100%; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding-left: 4px; }
+
+/* a card: face down until ComfyUI starts on it, then it turns over; the step sketch develops on its face (soft, a little
+   blurred) and the finished picture fades in over it. A thin red line along the bottom edge is how far the drawing is. */
+.tile .back { position: absolute; inset: 0; border-radius: inherit; opacity: 0; pointer-events: none;
+  background: repeating-linear-gradient(45deg, var(--back) 0 7px, #134A3F 7px 14px);
+  box-shadow: inset 0 0 0 7px var(--back), inset 0 0 0 8.5px rgba(232, 176, 74, 0.75); }
+.tile .back::after { content: ""; position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px; border-radius: 4px; background: var(--accent); transform: rotate(45deg); opacity: 0.85; }
+.tile.down .back { opacity: 1; }
+.tile.down img, .tile.down .chg { visibility: hidden; }
+.sketch { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; filter: blur(5px); transform: scale(1.06); transition: opacity 0.35s ease-out; pointer-events: none; }
+.sketch.on { opacity: 1; }
+.prog { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(0, 0, 0, 0.5); pointer-events: none; transition: opacity 0.4s ease-out; z-index: 2; }
+.prog i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.45s ease-out; }
+.prog.gone { opacity: 0; }
+.main { padding-left: env(safe-area-inset-left, 0px); }
+.top { height: 48px; flex: none; display: flex; align-items: center; gap: 14px; padding-inline: 16px 24px; min-width: 0; }
+.top .where { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.top .state { margin-left: auto; white-space: nowrap; display: flex; align-items: center; gap: 8px; }
+.top .state.err { color: var(--accent); }
+.top .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: blink 1s steps(1) infinite; }
+
+/* stage: the grid fills the free height; tiles keep the picture's 512x688 shape */
+.stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 4px 16px 10px; }
+#grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; max-width: 100%; }
+.cell { min-width: 0; min-height: 0; aspect-ratio: var(--tile-ratio); }
+.tile { position: relative; width: 100%; height: 100%; padding: 0; border: 0; border-radius: 16px; overflow: hidden;
+  background: var(--card); display: block; text-align: left; box-shadow: 0 0 0 1px rgba(232, 176, 74, 0.4); transition: transform 0.18s var(--ease), box-shadow 0.18s; }
+.tile:hover { transform: translateY(-2px); box-shadow: 0 0 0 1.5px var(--accent); }
+.tile.here { box-shadow: 0 0 0 2px var(--accent); }
+.tile.here:hover { box-shadow: 0 0 0 2px var(--glow); }
+.tile img.pic { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; opacity: 0; transition: opacity 0.35s ease-out; }
+.tile img.pic.on { opacity: 1; }
+.tile .wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 12px; }
+.tile.err .wait { color: var(--accent); background: rgba(0, 0, 0, 0.6); }
+.tile .num { position: absolute; top: 10px; left: 10px; padding: 4px 6px; border-radius: 6px; background: rgba(0, 0, 0, 0.62);
+  font: 500 9.5px/1 var(--font-label); letter-spacing: 0.08em; color: var(--text-2); }
+.tile .badge { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); padding: 5px 8px; border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72); white-space: nowrap; }
+.tile .chg { position: absolute; left: 0; right: 0; bottom: 0; padding: 22px 10px 8px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.86));
+  font: 400 10.5px/1.4 var(--font-body); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cell:hover .tile .chg { white-space: normal; }
+.tile .chg b { color: var(--accent); font-weight: 400; }
+.tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; opacity: 0; transition: opacity 0.15s; }
+.cell:hover .tools, .tools:focus-within { opacity: 1; }
+.tool { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 9px;
+  background: rgba(35, 15, 20, 0.88); color: var(--text); }
+.tool svg.i { width: 16px; height: 16px; }
+.tool.on { color: var(--accent); }
+.cell { position: relative; }
+
+/* the hand: the cards (pushes) behind the picture you hold; pointing at a dealt card shows its hand instead */
+.hand { flex: none; display: flex; align-items: center; gap: 14px; padding: 0 16px 12px; min-width: 0; }
+.hand > .label { width: 78px; flex: none; line-height: 1.5; }
+#hand { display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden; min-width: 0; scrollbar-width: thin; padding: 2px; height: 86px; align-items: stretch; }
+.hc { flex: none; min-width: 150px; padding: 9px 12px 8px; border-radius: 9px; background: var(--ivory); color: var(--ink); display: flex; flex-direction: column; gap: 5px;
+  animation: rise 0.25s ease-out both; box-shadow: inset 0 0 0 1px rgba(232, 176, 74, 0.9); transition: box-shadow 0.2s ease-out, opacity 0.2s ease-out; }
+.hc .hd { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hc .hd b { font: 600 13px/1.2 var(--font-body); color: var(--ink); white-space: nowrap; }
+.hc .sub { font: 400 12px/1.2 var(--font-body); color: var(--ink-2); white-space: nowrap; }
+.hc .acts { display: flex; gap: 12px; margin-top: auto; }
+.hc .acts button { padding: 2px 0; border: 0; background: none; color: var(--ink-2); font: 600 10px/1 var(--font-label); letter-spacing: 0.08em; text-transform: uppercase; }
+.hc .acts button:hover { color: var(--ink); }
+.hc .acts button[aria-pressed="true"] { color: var(--suit-red); }
+.hc .tag { margin-top: auto; font: 600 10px/1 var(--font-label); letter-spacing: 0.08em; text-transform: uppercase; color: var(--suit-red); padding: 2px 0; }
+.hc.held { box-shadow: inset 0 0 0 3px var(--accent); }
+.hc.new, .hc.chg { box-shadow: inset 0 0 0 1px rgba(232, 176, 74, 0.9), 0 0 0 2px var(--accent); }
+.hc.gone { opacity: 0.5; }
+.hc.gone .hd b { text-decoration: line-through; }
+.hc.gone .tag { color: var(--ink-2); }
+svg.emb { width: 22px; height: 22px; flex: none; border-radius: 4px; }
+svg.emb.up { color: var(--accent); }
+svg.emb.dn { color: var(--text-2); }
+.hc svg.emb.up { color: var(--suit-red); }
+.hc svg.emb.dn { color: var(--back); }
+.empty { color: var(--text-3); font-size: 13px; align-self: center; }
+/* the trail (rail panel): the cards you took, in order */
+#trail { --fav: 96px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(var(--fav), 100%), 1fr)); gap: 8px; }
+#trail button { padding: 0; border: 0; border-radius: 10px; overflow: hidden; background: var(--card); position: relative; animation: rise 0.25s ease-out both; }
+#trail img { width: 100%; aspect-ratio: var(--tile-ratio); object-fit: cover; display: block; opacity: 0.75; transition: opacity 0.15s; }
+#trail button:hover img, #trail button.cur img { opacity: 1; }
+#trail button.cur { box-shadow: 0 0 0 1.5px var(--accent); }
+#trail .n { position: absolute; top: 6px; left: 6px; padding: 3px 5px; border-radius: 5px; background: rgba(0, 0, 0, 0.62); font: 500 9px/1 var(--font-label); color: var(--text-2); }
+
+/* composer: picture chips over one control row, the prompt beside them */
+.composer { flex: none; display: flex; flex-direction: column; gap: 10px; padding: 0 16px 22px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: var(--raise); color: var(--text-2); font: 400 13px/1 var(--font-body); }
+.chip:hover { color: var(--text); }
+.chip[aria-pressed="true"] { background: var(--raise-2); color: var(--accent); }
+.bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.seg { display: inline-flex; gap: 4px; padding: 4px; border-radius: 12px; background: var(--card); }
+.seg button { height: 44px; min-width: 60px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: var(--text-3);
+  font: 600 10.5px/1 var(--font-label); letter-spacing: 0.1em; text-transform: uppercase; display: flex; align-items: center; gap: 7px; transition: background 0.2s, color 0.2s; }
+.seg button svg.i { width: 16px; height: 16px; }
+.seg button[aria-pressed="true"] { background: var(--raise-2); color: var(--accent); }
+.seg button:hover { color: var(--text); }
+.seg button[aria-pressed="true"]:hover { color: var(--accent); }
+/* the prompt: two lines at rest; while you type it grows upward over the path strip to show the whole prompt */
+.pbox { position: relative; flex: 1 1 260px; min-width: 0; height: 64px; }
+#prompt { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 64px; padding: 12px 18px; border: 0; border-radius: 16px; resize: none;
+  background: var(--field); color: var(--text); caret-color: var(--accent); font: 400 13.5px/1.45 var(--font-body); outline: none; overflow-y: auto;
+  scrollbar-width: thin; z-index: 5; transition: height 0.3s var(--ease), box-shadow 0.2s; }
+#prompt::placeholder { color: var(--text-3); }
+#prompt:focus { box-shadow: 0 0 0 1.5px var(--text-3), 0 -12px 32px rgba(0, 0, 0, 0.7); }
+#prompt.typing { box-shadow: 0 0 0 1.5px rgba(232, 176, 74, 0.55); }
+.chip.mine { display: inline-flex; align-items: center; gap: 6px; padding-right: 6px; }
+.chip.mine .del { width: 20px; height: 20px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-3);
+  opacity: 0; transition: opacity 0.15s, background 0.15s; }
+.chip.mine:hover .del, .chip.mine:focus-visible .del, .chip.mine .del.sure { opacity: 1; }
+.chip.mine .del:hover { color: var(--text); background: var(--raise-2); }
+.chip.mine .del.sure { color: var(--on-accent); background: var(--accent); width: auto; padding: 0 6px; font: 600 9px/1 var(--font-label); letter-spacing: 0.08em; text-transform: uppercase; }
+.chip.add { color: var(--text-3); }
+.chip.add:hover { color: var(--accent); }
+.chips input.named { width: 200px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: var(--field); box-shadow: 0 0 0 1.5px var(--accent);
+  color: var(--text); caret-color: var(--accent); font: 400 13px/1 var(--font-body); outline: none; animation: rise 0.2s ease-out both; }
+.dial { display: flex; flex-direction: column; gap: 8px; width: 170px; }
+.dial .ends { display: flex; justify-content: space-between; }
+input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 22px; background: transparent; margin: 0; }
+input[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--raise-2); }
+input[type=range]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--raise-2); }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; margin-top: -6px; border-radius: 50%; background: var(--text); border: 0; }
+input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--text); border: 0; }
+input[type=range]:hover::-webkit-slider-thumb { background: var(--accent); }
+input[type=range]:hover::-moz-range-thumb { background: var(--accent); }
+.pad { position: relative; width: 64px; height: 64px; flex: none; }
+.pad button { width: 64px; height: 64px; border: 0; border-radius: 32px; display: flex; align-items: center; justify-content: center;
+  background: var(--accent); color: var(--on-accent); position: relative; overflow: hidden; transition: background 0.2s, box-shadow 0.25s; }
+.pad button:hover { background: var(--glow); }
+.pad button:active { background: var(--accent-press); }
+.pad button svg.i { width: 22px; height: 22px; }
+.pad button { font: 600 11px/1 var(--font-label); letter-spacing: 0.1em; text-transform: uppercase; }
+.pad button.dirty { box-shadow: 0 0 0 4px rgba(232, 176, 74, 0.28); }
+.pad button.busy { background: var(--raise-2); color: var(--accent); }
+.pad button.busy::after { content: ""; position: absolute; left: 0; right: 0; top: -24px; height: 28px;
+  background: linear-gradient(to bottom, rgba(232, 176, 74, 0), rgba(232, 176, 74, 0.35), rgba(232, 176, 74, 0)); animation: padscan 1.2s ease-in-out infinite alternate; }
+
+/* tooltips (shown on hover / keyboard focus) */
+.tipped { position: relative; }
+.tip { position: absolute; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--tip); color: var(--text);
+  font: 500 11px/1 var(--font-label); letter-spacing: 0; text-transform: none; white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity 0.12s; z-index: 20; }
+.tipped:hover .tip, .tipped:focus-visible .tip { opacity: 1; }
+kbd { padding: 3px 5px; border-radius: 4px; background: var(--kbd); font: 500 10px/1 var(--font-label); color: var(--text); }
+.pad .tip { right: 0; bottom: 72px; }
+.rail .tip { right: 80px; top: 50%; transform: translateY(-50%); }
+
+/* rail + panel */
+.rail { position: relative; z-index: 3; width: 88px; flex: none; display: flex; flex-direction: column; justify-content: space-between; align-items: center;
+  padding: 16px 0 24px; background: var(--rail); }
+.rail .group { display: flex; flex-direction: column; gap: 4px; }
+.rail .r { width: 72px; height: 64px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: 12px;
+  background: none; color: var(--text); font: 500 9.5px/1 var(--font-label); letter-spacing: 0.08em; text-transform: uppercase; text-decoration: none; }
+.rail .r:hover { background: var(--card); }
+.rail .r[aria-pressed="true"] { background: var(--raise); color: var(--accent); }
+.rail .count { position: absolute; top: 9px; right: 14px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: var(--on-accent);
+  font: 600 9px/16px var(--font-label); text-align: center; }
+/* the panel slides out of the rail (ease-out); drag its edge (or the rail) to make it wider, narrower, or shut */
+.sheet { --w: 340px; position: relative; z-index: 2; width: 0; flex: none; overflow: hidden; background: var(--panel);
+  transition: width 0.55s cubic-bezier(0.16, 1, 0.3, 1); }
+.sheet.open { width: var(--w); }
+.sheet.dragging, .sheet.dragging aside { transition: none; }
+.sheet aside { width: max(280px, var(--w)); height: 100%; display: flex; flex-direction: column; padding: 22px 24px 24px;
+  padding-right: max(24px, env(safe-area-inset-right, 0px)); overflow-y: auto; opacity: 0; transform: translateX(36px);
+  transition: opacity 0.4s ease-out, transform 0.55s cubic-bezier(0.16, 1, 0.3, 1); }
+.sheet.open aside { opacity: 1; transform: none; }
+.sheet.open.closing aside { opacity: 0.35; }
+.grip { position: absolute; z-index: 4; left: 0; top: 0; bottom: 0; width: 12px; cursor: col-resize; touch-action: none; display: flex; align-items: center; justify-content: center; }
+.grip::before { content: ""; width: 4px; height: 44px; border-radius: 2px; background: var(--raise-2); opacity: 0; transition: opacity 0.2s, background 0.2s; }
+.grip:hover::before, .grip:focus-visible::before, .sheet.dragging .grip::before { opacity: 1; }
+.sheet.dragging .grip::before { background: var(--accent); }
+.rail { cursor: default; touch-action: pan-y; }
+.rail.dragging { cursor: col-resize; }
+.favsize { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.favsize input { flex: 1; }
+.sheet .head { display: flex; align-items: flex-start; gap: 8px; }
+.sheet .head > div { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+.sheet h2 { margin: 0; font: 600 19px/1.3 var(--font-head); text-wrap: balance; }
+.sheet .close { width: 44px; height: 44px; flex: none; display: flex; align-items: center; justify-content: center; border: 0; background: none; color: var(--text-3); }
+.sheet .close:hover { color: var(--text); }
+.sheet .lead { margin: 10px 0 16px; font: 400 13px/1.55 var(--font-body); color: var(--text-3); }
+.sec { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+.knob { padding: 10px 12px 8px; border-radius: 10px; background: var(--raise); }
+.knob .t { display: flex; justify-content: space-between; align-items: baseline; font: 400 13.5px/1.4 var(--font-body); }
+.knob .t span { font: 500 9.5px/1 var(--font-label); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.knob .ends { display: flex; justify-content: space-between; font: 400 11px/1 var(--font-body); color: var(--text-3); }
+.shapes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.shape { height: 58px; border: 0; border-radius: 10px; background: var(--raise); color: var(--text-2); display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 6px; font: 500 9.5px/1 var(--font-label); letter-spacing: 0.06em; }
+.shape i { display: block; border: 1.5px solid currentColor; border-radius: 2px; }
+.shape[aria-pressed="true"] { background: var(--raise-2); color: var(--accent); }
+.shape:hover { color: var(--text); }
+.shape[aria-pressed="true"]:hover { color: var(--accent); }
+.tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px; border-radius: 12px; background: var(--card); }
+.tabs.three { grid-template-columns: repeat(3, 1fr); }
+.tabs button { min-height: 46px; padding: 6px 4px; border: 0; border-radius: 9px; background: transparent; color: var(--text-3); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 4px; font: 600 9.5px/1 var(--font-label); letter-spacing: 0.08em; text-transform: uppercase; }
+.tabs button small { font: 400 10.5px/1 var(--font-body); letter-spacing: 0; text-transform: none; color: var(--text-3); }
+.tabs button[aria-pressed="true"] { background: var(--raise-2); color: var(--accent); }
+.tabs button:hover { color: var(--text); }
+.wh { display: flex; align-items: center; gap: 8px; }
+.wh input { width: 0; flex: 1; height: 44px; padding: 0 12px; border: 0; border-radius: 10px; background: var(--field); color: var(--text); font: 400 13.5px/1 var(--font-body);
+  font-variant-numeric: tabular-nums; caret-color: var(--accent); }
+.note { font: 400 12px/1.5 var(--font-body); color: var(--text-3); font-variant-numeric: tabular-nums; }
+.chips .size { margin-left: auto; display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.chips .size i { display: block; border: 1.5px solid currentColor; border-radius: 2px; }
+.pick { display: flex; flex-direction: column; gap: 6px; }
+.pick select { height: 46px; padding: 0 12px; border: 0; border-radius: 10px; background: var(--raise); color: var(--text); font: 400 13.5px/1 var(--font-body); }
+.linkbtn { border: 0; background: none; padding: 0; color: var(--text-3); font: 500 9.5px/1 var(--font-label); letter-spacing: 0.08em; text-transform: uppercase; }
+.linkbtn:hover { color: var(--text); }
+.row { min-height: 48px; padding: 11px 12px; border-radius: 10px; background: var(--raise); font: 400 13.5px/1.55 var(--font-body); }
+.row .up { color: var(--accent); }
+.row .dn { color: var(--text-2); }
+.row .sub { color: var(--text-3); font-size: 12px; margin-top: 2px; }
+#favs { --fav: 96px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(var(--fav), 100%), 1fr)); gap: 8px; }
+#favs button { animation: rise 0.25s ease-out both; }
+#favs button { padding: 0; border: 0; border-radius: 10px; overflow: hidden; background: var(--card); }
+#favs img { width: 100%; aspect-ratio: var(--tile-ratio); object-fit: cover; display: block; }
+
+/* close-up */
+#zoom { position: fixed; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center; gap: 28px; padding: 24px;
+  padding-left: max(24px, env(safe-area-inset-left, 0px)); padding-right: max(24px, env(safe-area-inset-right, 0px)); background: rgba(20, 8, 11, 0.94); }
+#zoom.on { display: flex; animation: rise 0.25s ease-out both; }
+.zpic { position: relative; flex: none; line-height: 0; border-radius: 16px; overflow: hidden; max-width: min(55vw, 100%); }
+#zImg { max-height: 88vh; max-width: 100%; display: block; }
+#zoom .side { width: 340px; max-width: 100%; display: flex; flex-direction: column; gap: 10px; padding: 22px 24px; border-radius: 16px; background: var(--panel); }
+#zoom .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn { height: 46px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--raise); color: var(--text); display: inline-flex; align-items: center; gap: 9px;
+  font: 400 13.5px/1 var(--font-body); }
+.btn:hover { background: var(--raise-2); }
+.btn svg.i { width: 16px; height: 16px; }
+/* before the first step: nothing draws until you start it. A first visit explains the loop; a later one shows where
+   you left off. */
+.start { width: min(580px, 100%); display: flex; flex-direction: column; gap: 18px; padding: 28px 30px; border-radius: 20px; background: var(--card); animation: rise 0.35s var(--ease) both; }
+.start h1 { margin: 0; font: 600 24px/1.25 var(--font-head); text-wrap: balance; }
+.start p { margin: 0; color: var(--text-2); font-size: 13.5px; text-wrap: pretty; }
+.start .steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 14px; }
+.start .steps li { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 14px; align-items: start; color: var(--text-2); font-size: 13.5px; line-height: 1.55; opacity: 0; animation: rise 0.4s var(--ease) both; }
+.start .steps li:nth-child(1) { animation-delay: 0.12s; }
+.start .steps li:nth-child(2) { animation-delay: 0.24s; }
+.start .steps li:nth-child(3) { animation-delay: 0.36s; }
+.start .steps .n { width: 26px; height: 26px; border-radius: 8px; background: var(--raise); color: var(--accent); display: flex; align-items: center; justify-content: center; font: 600 11px/1 var(--font-label); }
+.start .steps b { color: var(--text); font-weight: 500; }
+.start .acts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding-top: 4px; }
+.start .note { font: 500 10px/1 var(--font-label); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-3); }
+.start .note kbd { padding: 3px 5px; border-radius: 4px; background: var(--kbd); color: var(--text); font: inherit; }
+.start.back { flex-direction: row; align-items: center; gap: 24px; width: min(640px, 100%); }
+.start.back .col { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.start .here-img { width: 168px; flex: none; aspect-ratio: var(--tile-ratio); border-radius: 14px; object-fit: cover; background: var(--raise); }
+@media (max-width: 820px) { .start.back { flex-direction: column; align-items: stretch; } .start .here-img { width: 50%; align-self: center; } }
+.btn.go { background: var(--accent); color: var(--on-accent); }
+.btn.go:hover { background: var(--glow); }
+.btn.on { color: var(--accent); }
+#zName { flex: 1; min-width: 0; height: 46px; padding: 0 14px; border: 0; border-radius: 10px; background: var(--field); color: var(--text); caret-color: var(--accent);
+  font: 400 13.5px/1 var(--font-body); outline: none; }
+#zMsg { min-height: 18px; font: 400 12.5px/1.5 var(--font-body); color: var(--text-3); }
+#zMsg.good { color: var(--text); }
+
+/* drawing settings in Tune */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field textarea, .field input[type=text], .field input[type=number] { width: 100%; padding: 11px 12px; border: 0; border-radius: 10px; background: var(--field); color: var(--text);
+  font: 400 13.5px/1.45 var(--font-body); caret-color: var(--accent); outline: none; resize: vertical; font-variant-numeric: tabular-nums; }
+.field textarea:focus, .field input:focus { box-shadow: 0 0 0 1.5px var(--text-3); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.reading { height: 4px; border-radius: 2px; background: var(--raise-2); overflow: hidden; }
+.reading i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.4s ease-out; }
+
+@media (max-width: 820px) {
+  body { overflow: auto; }
+  .app { flex-direction: column; height: auto; min-height: 100%; }
+  .main { padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  .stage { padding-inline: 0; }
+  #grid { height: auto; width: 100%; }
+  .rail { width: auto; flex-direction: row; padding: 8px max(16px, env(safe-area-inset-left, 0px)); overflow-x: auto; justify-content: flex-start; gap: 4px; }
+  .rail .group { flex-direction: row; }
+  .rail .tip { display: none; }
+  .sheet.open { width: 100%; }
+  .sheet aside { width: 100%; }
+  .dial { width: 100%; }
+  #zoom { flex-direction: column; overflow-y: auto; justify-content: flex-start; }
+  .zpic { max-width: 100%; }
+  #zImg { max-width: 100%; max-height: 60vh; }
+}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <div class="main">
+    <header class="top">
+      <span class="label where" id="where">LoRA Casino</span>
+      <span class="label state" id="status" role="status" aria-live="polite"></span>
+    </header>
+
+    <section class="stage" aria-label="Pictures">
+      <div id="grid"></div>
+      <div id="start" class="start" hidden></div>
+    </section>
+
+    <div class="hand">
+      <span class="label" id="handLabel">Your hand</span>
+      <div id="hand" aria-live="off"></div>
+    </div>
+
+    <div class="composer">
+      <div class="chips" id="presets" role="group" aria-label="Picture"></div>
+      <div class="bar">
+        <div class="seg" role="group" aria-label="Mode">
+          <button type="button" data-p="0" aria-pressed="true" title="Each deal draws, discards and swaps cards">Draw</button>
+          <button type="button" data-p="1" aria-pressed="false" title="Same cards, small changes to the hand you hold"><svg class="i" data-icon="Edit" aria-hidden="true" viewBox="0 0 24 24"></svg>Refine</button>
+        </div>
+        <div class="seg" role="group" aria-label="Pictures per step">
+          <button type="button" data-m="8" aria-pressed="true" aria-label="Nine pictures"><svg class="i" data-icon="grid" aria-hidden="true" viewBox="0 0 24 24"></svg>9</button>
+          <button type="button" data-m="4" aria-pressed="false" aria-label="Cross of four"><svg class="i" data-icon="cross" aria-hidden="true" viewBox="0 0 24 24"></svg>4</button>
+        </div>
+        <div class="pbox">
+          <label for="prompt" class="sr">Prompt</label>
+          <textarea id="prompt" rows="2" placeholder="Describe the picture" autocomplete="off" spellcheck="false"></textarea>
+        </div>
+        <div class="dial" id="wildCtl">
+          <div class="ends"><span class="label" id="wLo">low stakes</span><span class="label" id="wHi">high</span></div>
+          <label for="wild" class="sr">Stakes: how much each deal changes the hand</label>
+          <input id="wild" type="range" min="0" max="1" step="0.05" value="0.5">
+        </div>
+        <div class="pad tipped">
+          <button type="button" id="redo">Deal</button>
+          <span class="tip" role="tooltip" id="padTip">Deal again <kbd>Space</kbd></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <nav class="rail" aria-label="LoRA Casino">
+    <div class="group">
+      <button type="button" class="r tipped" data-tab="tune" aria-pressed="false"><svg class="i" data-icon="tune" aria-hidden="true" viewBox="0 0 24 24"></svg>Table<span class="tip" role="tooltip">Picture size · new cards · model</span></button>
+      <button type="button" class="r tipped" data-tab="saved" aria-pressed="false"><svg class="i" data-icon="chip" aria-hidden="true" viewBox="0 0 24 24"></svg>Winnings<span class="count" id="favCount" hidden></span><span class="tip" role="tooltip">Pictures you kept <kbd>F</kbd> keeps one</span></button>
+      <button type="button" class="r tipped" data-tab="trail" aria-pressed="false"><svg class="i" data-icon="trail" aria-hidden="true" viewBox="0 0 24 24"></svg>Trail<span class="tip" role="tooltip">The cards you took, in order</span></button>
+    </div>
+    <div class="group">
+      <button type="button" class="r tipped" id="back"><svg class="i" data-icon="Back" aria-hidden="true" viewBox="0 0 24 24"></svg>Take back<span class="tip" role="tooltip">Back to the card before <kbd>Backspace</kbd></span></button>
+      <button type="button" class="r tipped" id="reseed"><svg class="i" data-icon="dice" aria-hidden="true" viewBox="0 0 24 24"></svg>Shuffle<span class="tip" role="tooltip">Same hand, new starting noise</span></button>
+      <button type="button" class="r tipped" id="restart"><svg class="i" data-icon="Undo" aria-hidden="true" viewBox="0 0 24 24"></svg>Fold<span class="tip" role="tooltip">Give up the hand: back to the plain picture</span></button>
+    </div>
+  </nav>
+
+  <div class="sheet" id="sheet">
+    <div class="grip" id="grip" role="separator" aria-orientation="vertical" aria-label="Panel width: drag, or use the arrow keys" tabindex="0"></div>
+    <aside id="tab-tune" aria-labelledby="t-tune" hidden>
+      <div class="head"><div><span class="eyebrow">Table</span><h2 id="t-tune">How this table plays</h2></div>
+        <button type="button" class="close" data-close aria-label="Close the panel"><svg class="i" data-icon="close" aria-hidden="true" viewBox="0 0 24 24"></svg></button></div>
+      <p class="lead">Picture size, how new cards are picked, and the model. Changes apply from the next deal.</p>
+      <div class="sec" id="sizeSec">
+        <span class="eyebrow" style="color:var(--text-3)">Picture shape</span>
+        <div class="shapes" id="shapes" role="group" aria-label="Picture shape"></div>
+        <span class="eyebrow" style="color:var(--text-3);margin-top:10px">Dealt pictures</span>
+        <div class="tabs" id="stepQ" role="group" aria-label="Size of the step pictures"></div>
+        <div class="wh" id="customWH" hidden>
+          <label for="cw" class="sr">Width</label><input id="cw" type="number" min="256" max="2048" step="16" inputmode="numeric">
+          <span class="note">×</span>
+          <label for="ch" class="sr">Height</label><input id="ch" type="number" min="256" max="2048" step="16" inputmode="numeric">
+        </div>
+        <span class="eyebrow" style="color:var(--text-3);margin-top:10px">Full size (close-up, LoRA preview)</span>
+        <div class="tabs three" id="finalQ" role="group" aria-label="Full size"></div>
+        <p class="note" id="sizeNote" style="margin:4px 0 0"></p>
+      </div>
+      <span class="eyebrow" style="color:var(--text-3)">New cards</span>
+      <p class="lead" style="margin:6px 0 10px">These shape the cards a deal draws; the ones in your hand stay as they are. Double-click a slider to reset it.</p>
+      <div class="sec" id="knobs"></div>
+      <div class="sec"><button type="button" class="linkbtn" id="kReset" style="align-self:flex-start">Reset all five</button></div>
+      <div class="sec">
+        <span class="eyebrow" style="color:var(--text-3)">Model</span>
+        <div class="pick"><label for="ckpt" class="sr">Checkpoint</label><select id="ckpt"></select></div>
+        <div class="reading" id="readBar" hidden><i></i></div>
+        <div class="pick"><label for="vae" class="sr">VAE</label><select id="vae"></select></div>
+        <p class="lead" style="margin:4px 0 0">Any SDXL checkpoint: SDXL itself, Pony, Illustrious, NoobAI and their merges. The first time you use one, its weights are read to size the pushes for it. That takes about a minute and is kept.</p>
+      </div>
+      <div class="sec">
+        <span class="eyebrow" style="color:var(--text-3)">Drawing</span>
+        <div class="field"><label class="label" for="neg">Negative prompt</label><textarea id="neg" rows="2" autocomplete="off" spellcheck="false"></textarea></div>
+        <div class="two">
+          <div class="field"><label class="label" for="steps">Steps</label><input id="steps" type="number" min="1" max="60" step="1" inputmode="numeric"></div>
+          <div class="field"><label class="label" for="cfg">CFG</label><input id="cfg" type="number" min="1" max="30" step="0.5" inputmode="decimal"></div>
+        </div>
+        <div class="two">
+          <div class="pick"><label class="label" for="sampler">Sampler</label><select id="sampler"></select></div>
+          <div class="pick"><label class="label" for="scheduler">Scheduler</label><select id="scheduler"></select></div>
+        </div>
+        <p class="note" style="margin:4px 0 0">Set these the way your checkpoint likes them. Full size uses two thirds more steps.</p>
+      </div>
+      <div class="sec" id="comfySec">
+        <span class="eyebrow" style="color:var(--text-3)">ComfyUI</span>
+        <div class="field"><label class="label" for="comfyUrl">Address</label><input id="comfyUrl" type="text" placeholder="http://127.0.0.1:8188" autocomplete="off" spellcheck="false"></div>
+        <p class="note" id="comfyNote" style="margin:4px 0 0"></p>
+      </div>
+      <div class="sec">
+        <span class="eyebrow" style="color:var(--text-3)">Motion</span>
+        <div class="tabs three" id="motionSeg" role="group" aria-label="Motion" style="grid-template-columns:repeat(2,1fr)">
+          <button type="button" data-motion="on">On<small>deals, turns, typing</small></button>
+          <button type="button" data-motion="off">Off<small>everything at once</small></button>
+        </div>
+      </div>
+    </aside>
+    <aside id="tab-saved" aria-labelledby="t-saved" hidden>
+      <div class="head"><div><span class="eyebrow">Winnings</span><h2 id="t-saved">Pictures you kept</h2></div>
+        <button type="button" class="close" data-close aria-label="Close the panel"><svg class="i" data-icon="close" aria-hidden="true" viewBox="0 0 24 24"></svg></button></div>
+      <p class="lead">The chip on a card keeps it here. Open one to draw it full size or cash it out as a LoRA.</p>
+      <div class="favsize"><label class="label" for="favSize">Size</label><input id="favSize" type="range" min="56" max="300" step="4" value="96"></div>
+      <div id="favs"></div>
+    </aside>
+    <aside id="tab-trail" aria-labelledby="t-trail" hidden>
+      <div class="head"><div><span class="eyebrow">Trail</span><h2 id="t-trail">The cards you took</h2></div>
+        <button type="button" class="close" data-close aria-label="Close the panel"><svg class="i" data-icon="close" aria-hidden="true" viewBox="0 0 24 24"></svg></button></div>
+      <p class="lead">In the order you took them. Pick one to go back to its hand.</p>
+      <div id="trail"></div>
+    </aside>
+  </div>
+</div>
+
+<div id="zoom" role="dialog" aria-modal="true" aria-labelledby="zTitle">
+  <div class="zpic" id="zPic"><img id="zImg" alt=""></div>
+  <div class="side">
+    <span class="eyebrow">Close-up</span>
+    <h2 id="zTitle" style="margin:0;font:600 19px/1.3 var(--font-head)">This card's hand</h2>
+    <div class="sec" id="zInside" style="margin:6px 0 4px"></div>
+    <div class="acts">
+      <button type="button" class="btn go" id="zGo"><svg class="i" data-icon="Continue" aria-hidden="true" viewBox="0 0 24 24"></svg>Take this card</button>
+      <button type="button" class="btn" id="zHeart"><svg class="i" data-icon="chip" aria-hidden="true" viewBox="0 0 24 24"></svg>Keep</button>
+    </div>
+    <div class="acts"><button type="button" class="btn" id="zFull"><svg class="i" data-icon="expand" aria-hidden="true" viewBox="0 0 24 24"></svg>Draw it full size</button></div>
+    <div class="acts">
+      <label for="zName" class="sr">Name for the LoRA</label>
+      <input id="zName" type="text" placeholder="name for the LoRA">
+      <button type="button" class="btn" id="zSave"><svg class="i" data-icon="Send" aria-hidden="true" viewBox="0 0 24 24"></svg>Cash out as LoRA</button>
+    </div>
+    <div id="zMsg" role="status"></div>
+    <button type="button" class="btn" id="zClose" style="align-self:flex-start">Close <kbd>Esc</kbd></button>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const NO_SERVER = "Can't reach LoRA Casino. Inside ComfyUI: check that ComfyUI is running. On its own: start LoRA Casino again. Then reload.";
+const api = (p, o) => fetch(p, o).catch(() => { throw new Error(NO_SERVER); })
+  .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || r.statusText); return j; });
+const post = (p, b) => api(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+const store = { get(k, d) { try { const v = localStorage.getItem('casino_' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+                set(k, v) { try { localStorage.setItem('casino_' + k, JSON.stringify(v)); } catch {} } };
+const img = k => `api/render/${k}.png`;
+const LAYOUT = { 8: [1, 2, 3, 4, 0, 5, 6, 7, 8], 4: [null, 1, null, 2, 0, 3, null, 4, null] };
+const CROSS_KEYS = { ArrowUp: 1, ArrowLeft: 3, ArrowRight: 5, ArrowDown: 7 };
+const CROSS_LABEL = { 1: '↑', 3: '←', 5: '→', 7: '↓' };
+// the icons: LoRA Casino's own line set (one weight, round ends), drawn here so nothing is fetched
+const DRAWN = {
+  tune: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9.5M17.5 7H20M4 17h3M11 17h9"/><circle cx="15.5" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></g>',
+  chip: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.6"/><circle cx="12" cy="12" r="3.4"/><path d="M12 3.4v2.7M12 17.9v2.7M3.4 12h2.7M17.9 12h2.7"/></g>',
+  trail: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.6" y="7.4" width="8.6" height="12" rx="2"/><path d="M8.6 4.6h7.2a2 2 0 0 1 2 2v9.6M13.4 2.4h5.4a2 2 0 0 1 2 2v8" opacity=".7"/></g>',
+  Back: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5.5L3.8 10.7 9 15.9"/><path d="M4.4 10.7h9.4a4.9 4.9 0 0 1 0 9.8h-3.3"/></g>',
+  dice: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7h3.2c2 0 3.2.9 4.3 2.6l2 3.8c1.1 1.7 2.3 2.6 4.3 2.6h3.2"/><path d="M3.5 17h3.2c1.4 0 2.4-.5 3.3-1.5M14 8.5c.9-1 1.9-1.5 3.3-1.5h3.2"/><path d="M17.7 4.4L20.6 7l-2.9 2.6M17.7 13.4l2.9 2.6-2.9 2.6"/></g>',
+  Undo: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3.5" width="12" height="17" rx="2.3"/><path d="M9.6 9.6l4.8 4.8M14.4 9.6l-4.8 4.8"/></g>',
+  Edit: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 19.4l3.7-.8L19 7.9a2 2 0 0 0-2.9-2.9L5.4 15.7z"/><path d="M14.5 6.6l2.9 2.9"/></g>',
+  Continue: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12h14M13 6.3l5.7 5.7-5.7 5.7"/></g>',
+  Image: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.2"/><path d="M15.2 15.2l5 5"/></g>',
+  expand: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 9.8V4.5h5.3M19.5 14.2v5.3h-5.3M4.8 4.8l5.6 5.6M19.2 19.2l-5.6-5.6"/></g>',
+  Send: '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6.8" rx="7" ry="2.8"/><path d="M5 6.8v5.1c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6.8M5 11.9V17c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-5.1"/></g>',
+  grid: '<g fill="currentColor"><rect x="3.5" y="3.5" width="4.8" height="4.8" rx="1.3"/><rect x="9.6" y="3.5" width="4.8" height="4.8" rx="1.3"/><rect x="15.7" y="3.5" width="4.8" height="4.8" rx="1.3"/><rect x="3.5" y="9.6" width="4.8" height="4.8" rx="1.3"/><rect x="9.6" y="9.6" width="4.8" height="4.8" rx="1.3"/><rect x="15.7" y="9.6" width="4.8" height="4.8" rx="1.3"/><rect x="3.5" y="15.7" width="4.8" height="4.8" rx="1.3"/><rect x="9.6" y="15.7" width="4.8" height="4.8" rx="1.3"/><rect x="15.7" y="15.7" width="4.8" height="4.8" rx="1.3"/></g>',
+  cross: '<g fill="currentColor"><rect x="9.6" y="3.5" width="4.8" height="4.8" rx="1.3"/><rect x="3.5" y="9.6" width="4.8" height="4.8" rx="1.3"/><rect x="9.6" y="9.6" width="4.8" height="4.8" rx="1.3" opacity=".45"/><rect x="15.7" y="9.6" width="4.8" height="4.8" rx="1.3"/><rect x="9.6" y="15.7" width="4.8" height="4.8" rx="1.3"/></g>',
+  close: '<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M18 6L6 18"/>',
+};
+let ICONS = {};
+function paintIcons(root = document) {
+  root.querySelectorAll('svg[data-icon]').forEach(s => { if (!s.dataset.painted) { const k = s.dataset.icon; const m = ICONS[k] || DRAWN[k]; if (m) { s.innerHTML = m; s.dataset.painted = '1'; } } });
+}
+const ic = name => `<svg class="i" data-icon="${name}" aria-hidden="true" viewBox="0 0 24 24"></svg>`;
+
+let META, prompts = [], round = null, cards = [], hover = null, zoomCard = null, pollT = null, dirty = false, busy = false;
+let S = store.get('state', null);
+if (!S || !S.path) S = { preset: 0, prompt: '', seed: 6100, wild: 0.5, mode: 8, path: [{ mix: [], key: null }] };
+if (S.mode !== 4) S.mode = 8;
+if (typeof S.fine !== 'number') S.fine = 0.3;
+S.polish = !!S.polish;
+S.knobs = S.knobs || {};
+const KNOB_UI = [
+  ['size', 'Card size', 'one neuron', 'a whole group'],
+  ['strength', 'Card strength', 'gentle', 'strong'],
+  ['depth', 'Where in the network', 'layout', 'fine detail'],
+  ['spread', 'Spread', 'one spot', 'anywhere'],
+  ['count', 'Cards in a new hand', 'one', 'many'],
+];
+// the checkpoint, VAE and drawing settings every request carries; a favourite keeps the ones it was drawn with
+const SETUP_KEYS = ['ckpt', 'vae', 'negative', 'cfg', 'sampler', 'scheduler'];
+const reqModel = () => ({ ckpt: S.ckpt || undefined, vae: S.vae ?? undefined, negative: S.negative, cfg: S.cfg, sampler: S.sampler, scheduler: S.scheduler });
+const setupOf = c => c && c.ckpt ? Object.fromEntries(SETUP_KEYS.filter(k => c[k] !== undefined).map(k => [k, c[k]])) : reqModel();
+const fullSteps = n => Math.round((n || S.steps) * 5 / 3);
+// this tab's id: kept across reloads (sessionStorage is per tab), so reloading cancels this tab's unfinished step
+const CLIENT = (() => {
+  try { let c = sessionStorage.getItem('casino_client'); if (!c) { c = Math.random().toString(36).slice(2, 12); sessionStorage.setItem('casino_client', c); } return c; }
+  catch { return Math.random().toString(36).slice(2, 12); }
+})();
+let favs = store.get('favs', []);
+const save = () => store.set('state', S);
+
+// ---------------------------------------------------------------- picture size
+// step pictures: Fast = 512x688 at 3:4 (about 0.35 MP), Balanced 0.6 MP, Sharp 1 MP (SDXL's own size), or your own.
+// full size (close-up, LoRA preview): 0.8 / 1 / 1.5 MP in the same shape. Sides round to multiples of 16.
+const SHAPES = { '3:4': [3, 4], '2:3': [2, 3], '9:16': [9, 16], '1:1': [1, 1], '4:3': [4, 3], '3:2': [3, 2], '16:9': [16, 9] };
+const STEP_Q = { fast: ['Fast', 0.3523], balanced: ['Balanced', 0.6], sharp: ['Sharp', 1.0486], custom: ['Own', 0] };  // sharp = 1024² (SDXL's own)
+const FINAL_Q = { '0.8': 0.786, '1': 1.0486, '1.5': 1.5 };
+if (!SHAPES[S.aspect]) S.aspect = '3:4';
+if (!STEP_Q[S.q]) S.q = 'fast';
+if (!FINAL_Q[S.final]) S.final = '1';
+S.custom = S.custom || { w: 512, h: 688 };
+const r16 = v => Math.round(v / 16) * 16;
+const clampSide = v => Math.min(2048, Math.max(256, r16(v)));
+function dims(ratio, mp) { const h = Math.sqrt(mp * 1e6 / ratio); return { w: clampSide(h * ratio), h: clampSide(h) }; }
+function shapeRatio() { const [a, b] = SHAPES[S.aspect]; return a / b; }
+function stepSize() { return S.q === 'custom' ? { w: clampSide(S.custom.w), h: clampSide(S.custom.h) } : dims(shapeRatio(), STEP_Q[S.q][1]); }
+function finalFor(sz) { const s = sz || stepSize(); return dims(s.w / s.h, FINAL_Q[S.final]); }
+const secsFor = (s, steps) => Math.max(1, Math.round(4 * (s.w * s.h / 352256) * (steps / 12)));  // measured: ~4 s for 512x688, 12 steps, 3060
+const glyph = (s, max) => { const k = max / Math.max(s.w, s.h); return `<i aria-hidden="true" style="width:${Math.round(s.w * k)}px;height:${Math.round(s.h * k)}px"></i>`; };
+function fitGrid() {
+  const st = $('.stage'), g = $('#grid'); if (!st || !g) return;
+  if (matchMedia('(max-width: 820px)').matches) { g.style.width = '100%'; return; }
+  const s = stepSize(), cs = getComputedStyle(st);
+  const W = st.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const H = st.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  const tw = Math.max(40, Math.min((W - 24) / 3, ((H - 24) / 3) * (s.w / s.h)));
+  g.style.width = Math.floor(3 * tw + 24) + 'px';
+}
+function applyShape() { const s = stepSize(); document.documentElement.style.setProperty('--tile-ratio', `${s.w} / ${s.h}`); fitGrid(); }
+function drawSizeBtn() { const b = $('#sizeBtn'); if (!b) return; const s = stepSize(); b.innerHTML = `${glyph(s, 13)}${S.q === 'custom' ? 'own' : S.aspect} · ${s.w}×${s.h}`; }
+function sizeChanged() { save(); drawSize(); drawSizeBtn(); applyShape(); setDirty(true); }
+function drawSize() {
+  const s = stepSize(), f = finalFor(s), n = S.mode + 1;
+  $('#shapes').innerHTML = Object.keys(SHAPES).map(k => {
+    const [a, b] = SHAPES[k];
+    return `<button type="button" class="shape" data-shape="${k}" aria-pressed="${S.q !== 'custom' && S.aspect === k}">${glyph({ w: a, h: b }, 22)}${k}</button>`;
+  }).join('');
+  $('#stepQ').innerHTML = Object.entries(STEP_Q).map(([k, [t, mp]]) => {
+    const d = k === 'custom' ? stepSize() : dims(shapeRatio(), mp);
+    return `<button type="button" data-q="${k}" aria-pressed="${S.q === k}">${t}<small>${k === 'custom' && S.q !== 'custom' ? 'W × H' : d.w + '×' + d.h}</small></button>`;
+  }).join('');
+  $('#finalQ').innerHTML = Object.keys(FINAL_Q).map(k => { const d = dims(s.w / s.h, FINAL_Q[k]); return `<button type="button" data-f="${k}" aria-pressed="${S.final === k}">${k} MP<small>${d.w}×${d.h}</small></button>`; }).join('');
+  $('#customWH').hidden = S.q !== 'custom';
+  $('#cw').value = s.w; $('#ch').value = s.h;
+  const per = secsFor(s, S.steps || 12);
+  $('#sizeNote').textContent = `Steps draw at ${s.w}×${s.h}: roughly ${per} s a picture, ${per * n} s for ${n}. Full size ${f.w}×${f.h}: roughly ${secsFor(f, fullSteps(S.steps || 12))} s. (Guessed for a mid-range GPU.)`
+    + (s.w * s.h > 1.3e6 ? ' Past about 1.3 MP SDXL tends to repeat things (two heads, extra trees).' : '');
+  $('#shapes').querySelectorAll('[data-shape]').forEach(b => b.onclick = () => {
+    if (S.q === 'custom') { const c = stepSize(); S.custom = dims(SHAPES[b.dataset.shape][0] / SHAPES[b.dataset.shape][1], c.w * c.h / 1e6); }
+    S.aspect = b.dataset.shape; if (S.q === 'custom') S.q = 'custom'; sizeChanged();
+  });
+  $('#stepQ').querySelectorAll('[data-q]').forEach(b => b.onclick = () => { if (b.dataset.q === 'custom' && S.q !== 'custom') S.custom = stepSize(); S.q = b.dataset.q; sizeChanged(); });
+  $('#finalQ').querySelectorAll('[data-f]').forEach(b => b.onclick = () => { S.final = b.dataset.f; sizeChanged(); });
+}
+['cw', 'ch'].forEach(id => $('#' + id).onchange = () => {
+  S.custom = { w: clampSide(+$('#cw').value || 512), h: clampSide(+$('#ch').value || 688) };
+  if (S.custom.w * S.custom.h > 2.4e6) { status('Over 2.4 MP is too big for SDXL', true); S.custom = dims(S.custom.w / S.custom.h, 2.4); }
+  sizeChanged();
+});
+if (window.ResizeObserver) new ResizeObserver(() => fitGrid()).observe(document.querySelector('.stage') || document.body);
+addEventListener('resize', fitGrid);
+
+function status(t, err, live) {
+  const s = $('#status');
+  s.innerHTML = (live ? '<span class="dot" aria-hidden="true"></span>' : '') + `<span>${t}</span>`;
+  s.className = 'label state' + (err ? ' err' : '');
+}
+function promptText() { return $('#prompt').value.trim(); }
+function setDirty(v) {
+  dirty = v; $('#redo').classList.toggle('dirty', v);
+  if (v && started) status('Settings changed · they apply from the next deal');  // (before the first deal they're simply used)
+}
+
+// ---------------------------------------------------------------- the start: nothing draws until you ask
+// Opening the page doesn't draw by itself. A first visit gets the loop in three lines; a later one, the picture
+// you were at. The start button, Space, the round button or Enter in the prompt draw the first step.
+let started = false;
+const perStep = () => LAYOUT[S.mode].filter(x => x != null).length;
+function showStart() {
+  const box = $('#start'), here = S.path[S.path.length - 1], n = perStep();
+  const first = !store.get('seen', false);
+  const go = label => `<div class="acts"><button type="button" class="btn go" id="startGo">${ic('Continue')}${label}</button><span class="note">or press <kbd>Space</kbd></span></div>`;
+  if (first) {
+    box.className = 'start';
+    box.innerHTML = `<span class="eyebrow">LoRA Casino</span>
+      <h1>Play for a look you like</h1>
+      <ol class="steps">
+        <li><span class="n">1</span><span><b>Write what you want to see</b> in the box below, or take one of the presets just above it.</span></li>
+        <li><span class="n">2</span><span><b>The dealer lays out ${n} pictures.</b> Same prompt, but each plays a different hand: a few cards that push some of the model's neurons up or down.</span></li>
+        <li><span class="n">3</span><span><b>Take the one you like most</b>, and the next deal grows from its hand. The chip keeps a picture in Winnings, and a hand you like cashes out as a LoRA.</span></li>
+      </ol>
+      ${go(`Deal the first ${n}`)}`;
+  } else if (here.key) {
+    box.className = 'start back';
+    box.innerHTML = `<img class="here-img" src="${img(here.key)}" alt="The picture you were at">
+      <div class="col">
+        <span class="eyebrow">Where you left off · ${here.mix.length} card${here.mix.length === 1 ? '' : 's'} in hand</span>
+        <h1>Ready when you are</h1>
+        <p>Nothing is dealt until you say. Change the prompt or the table first if you like; they're used for this deal.</p>
+        ${go(`Deal the next ${n}`)}
+      </div>`;
+  } else {
+    box.className = 'start';
+    box.innerHTML = `<span class="eyebrow">LoRA Casino</span>
+      <h1>Ready when you are</h1>
+      <p>Write what you want to see below, or take a preset, then have ${n} pictures dealt to choose from.</p>
+      ${go(`Deal the first ${n}`)}`;
+  }
+  paintIcons(box);
+  drawTrail(); drawHand();
+  $('#startGo').onclick = () => newRound();
+  $('#grid').hidden = true; box.hidden = false;
+  $('#redo').textContent = 'Deal'; $('#padTip').innerHTML = `Deal ${n} pictures <kbd>Space</kbd>`;
+  status(first ? '' : 'Paused');
+}
+function hideStart() {
+  if (started) return;
+  started = true;
+  $('#start').hidden = true; $('#grid').hidden = false;
+  store.set('seen', true);
+}
+function setBusy(v) {
+  busy = v; const b = $('#redo');
+  b.classList.toggle('busy', v);
+  b.textContent = v ? 'Stop' : 'Deal';
+  $('#padTip').innerHTML = v ? 'Stop this deal' : 'Deal again <kbd>Space</kbd>';
+}
+function where() {
+  const p = S.preset === 'custom' ? 'Your prompt' : myOf(S.preset) ? myOf(S.preset).name : (prompts[S.preset]?.name || 'Picture');
+  const n = cur().mix.length;
+  $('#where').textContent = `LoRA Casino · ${p} · ${S.polish ? 'refine' : 'draw'} · ${n} card${n === 1 ? '' : 's'} in hand`;
+}
+
+// ---------------------------------------------------------------- drawing: a card that turns over
+// A dealt card lies face down until ComfyUI starts drawing it. On the first step sketch it turns over and the picture
+// develops on its face; the red line along its bottom edge is how far the drawing is. Without live steps from ComfyUI
+// the line follows a time estimate that learns from the pictures already drawn, and the card turns when it is done.
+const RM = { get matches() { return store.get('motion', 'on') === 'off'; } };  // the Motion switch in the Table panel
+document.documentElement.classList.toggle('still', RM.matches);
+const EST = { ms: 4000, key: '' };
+const faces = new Set();
+// turning a card over: it narrows to its edge, changes face there, and opens again with an ease-out
+function turn(el, atEdge) {
+  if (!el.classList.contains('down')) { atEdge && atEdge(); return; }
+  if (RM.matches || !el.animate) { el.classList.remove('down'); atEdge && atEdge(); return; }
+  if (el._turning) { el._turning.push(atEdge); return; }
+  el._turning = [atEdge];
+  const open = () => {
+    if (!el._turning) return;
+    const fns = el._turning; el._turning = null;
+    el.classList.remove('down'); fns.forEach(f => f && f());
+    el.animate([{ transform: 'scaleX(0.03)' }, { transform: 'scaleX(1)' }], { duration: 360, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+  };
+  const a = el.animate([{ transform: 'scaleX(1)' }, { transform: 'scaleX(0.03)' }], { duration: 170, easing: 'ease-in' });
+  a.onfinish = open; a.oncancel = open; setTimeout(open, 420);  // (a tab in the background still turns it)
+}
+// One picture being drawn on a card (or, "hollow", over the close-up): the progress line, the step sketch, the turn.
+class Pix {
+  constructor(host, opt = {}) {
+    this.host = host; this.hollow = !!opt.hollow; this.state = 'draw'; this.pv = 0; this.goal = 0;
+    this.sk = host.querySelector('img.sketch');
+    if (!this.sk) { this.sk = document.createElement('img'); this.sk.className = 'sketch'; this.sk.alt = ''; host.appendChild(this.sk); this.ownSketch = true; }
+    this.cv = document.createElement('span'); this.cv.className = 'prog'; this.cv.setAttribute('aria-hidden', 'true'); this.cv.innerHTML = '<i></i>';
+    host.appendChild(this.cv);
+    if (!this.hollow) host.classList.add('down');
+    host._pix = this; faces.add(this);
+  }
+  set(goal) {
+    if (this.state !== 'draw') return;
+    this.goal = Math.max(this.goal, Math.min(1, goal)); this.cv.firstChild.style.width = (this.goal * 100).toFixed(1) + '%';
+  }
+  preview(pid, n) {  // the newest step sketch from ComfyUI: the card turns over on the first one
+    if (pid !== this.pid) { this.pid = pid; this.pv = 0; }
+    if (this.loading || !pid || n <= this.pv || this.state !== 'draw') return;
+    this.loading = true;
+    const im = new Image();
+    im.onload = () => { this.loading = false; this.pv = n; if (this.state !== 'draw') return; this.sk.src = im.src; turn(this.host, () => this.sk.classList.add('on')); };
+    im.onerror = () => { this.loading = false; };
+    im.src = `api/preview?pid=${encodeURIComponent(pid)}&n=${n}`;
+  }
+  finish(im, onShow) {  // the real picture is here: turn the card if it is still face down, show it, let the sketch go
+    this.state = 'end'; this.cv.firstChild.style.width = '100%';
+    turn(this.host, () => { onShow && onShow(); });
+    setTimeout(() => this.drop(), 600);
+  }
+  drop() {
+    if (this.dropped) return;
+    this.dropped = true; faces.delete(this);
+    if (this.host._pix === this) this.host._pix = null;
+    this.cv.classList.add('gone'); this.sk.classList.remove('on');
+    setTimeout(() => { this.cv.remove(); if (this.ownSketch) this.sk.remove(); }, 450);
+  }
+}
+const dropSpirals = sel => { for (const s of [...faces]) if (s.host.closest(sel)) s.drop(); };
+
+// a picture that is already on disk sometimes fails on the first try: retry a few times.
+// done(im) may take over showing it (returns true), e.g. to let the spiral finish first
+function setImg(im, key, done) {
+  if (im.dataset.set === key) return;
+  im.dataset.set = key; im.dataset.tries = '0';
+  im.onload = () => { if (!(done && done(im))) im.classList.add('on'); };
+  im.onerror = () => { const n = +im.dataset.tries + 1; im.dataset.tries = String(n); if (n <= 6) setTimeout(() => { im.src = img(key) + '?r=' + n; }, 400 * n); };
+  im.src = img(key);
+}
+document.addEventListener('error', ev => {
+  const im = ev.target;
+  if (im.tagName !== 'IMG' || im.dataset.set || !im.src.includes('/render/')) return;
+  const n = (+im.dataset.tries || 0) + 1; im.dataset.tries = String(n);
+  if (n <= 6) setTimeout(() => { im.src = im.src.split('?')[0] + '?r=' + n; }, 400 * n);
+}, true);
+
+// ---------------------------------------------------------------- steps
+async function newRound() {
+  clearTimeout(pollT);
+  const parent = S.path[S.path.length - 1];
+  const prompt = promptText();
+  if (!prompt) return status('Write a prompt first', true);
+  hideStart();
+  S.prompt = prompt; save();
+  setDirty(false); where();
+  if (!(await modelReady())) return setBusy(false);
+  status('Dealing', false, true);
+  let r;
+  const size = { ...stepSize(), steps: S.steps };
+  try { r = await post('api/breed', { parent: parent.mix, prompt, seed: S.seed, wild: S.wild, knobs: S.knobs, n: S.mode, polish: S.polish, fine: S.fine, client: CLIENT, size, ...reqModel() }); }
+  catch (e) { setBusy(false); return status(e.message, true); }
+  round = r.round; cards = [r.parent, ...r.children];
+  parent.mix = r.parent.mix; parent.inside = r.parent.inside;  // the hand as the dealer holds it (with its card descriptions)
+  cards.forEach(c => { c.size = size; });
+  const ek = `${size.w}x${size.h}x${size.steps}`;
+  if (EST.key !== ek) { EST.key = ek; EST.ms = secsFor(size, size.steps) * 1000; }
+  setBusy(true); drawGrid(); poll();
+  if (!parent.key) parent.key = r.parent.key;  // a hand that had no picture yet (after a discard, or the plain start)
+  save();
+}
+function capHTML(c) {
+  if (c.parent || !c.changes.length) return '';
+  return `<div class="chg"><b>›</b> ${c.changes.map(esc).join(' · ')}</div>`;
+}
+function tileHTML(c, i, cell) {
+  const label = S.mode === 4 ? CROSS_LABEL[cell] : String(cell + 1);
+  c.label = label;
+  const name = c.parent ? 'Your card' : `Card ${label}`;
+  return `<button type="button" class="tile ${c.parent ? 'here' : ''}" data-i="${i}" aria-label="${name}${c.changes.length ? ': ' + esc(c.changes.join(', ')) : ''}">
+      <span class="back" aria-hidden="true"></span><img class="sketch" alt=""><img class="pic" alt="">
+      ${c.parent ? `<span class="badge eyebrow">${c.mix.length ? (S.polish ? 'Refining this hand' : 'Your card') : 'No cards yet'}</span>` : `<span class="num">${label}</span>`}
+      ${capHTML(c)}
+    </button>
+    <div class="tools">
+      <button type="button" class="tool ${isFav(c.key) ? 'on' : ''}" data-heart="${i}" aria-label="Keep in Winnings">${ic('chip')}</button>
+      <button type="button" class="tool" data-zoom="${i}" aria-label="Look closer">${ic('Image')}</button>
+    </div>`;
+}
+function drawGrid() {
+  const g = $('#grid');
+  dropSpirals('#grid');
+  g.innerHTML = LAYOUT[S.mode].map((ci, cell) => `<div class="cell">${ci == null || !cards[ci] ? '' : tileHTML(cards[ci], ci, cell)}</div>`).join('');
+  paintIcons(g);
+  const here = cur(), instant = !!here.key && cards[0].key === here.key;  // the card you just took is already face up
+  hover = null;
+  g.querySelectorAll('.tile').forEach(el => {
+    const i = +el.dataset.i;
+    el.onmouseenter = el.onfocus = () => { hover = i; drawHand(cards[i]); };
+    el.onmouseleave = el.onblur = () => { if (hover === i) { hover = null; drawHand(); } };
+    el.onclick = () => choose(i);
+    cards[i].pix = i === 0 && instant ? null : new Pix(el);
+  });
+  if (instant) showCard(0);
+  g.querySelectorAll('[data-heart]').forEach(b => b.onclick = () => toggleFav(cards[+b.dataset.heart]));
+  g.querySelectorAll('[data-zoom]').forEach(b => b.onclick = () => openZoom(cards[+b.dataset.zoom]));
+  deal(g, instant);
+  drawTrail(); drawHand(); where();
+}
+// the deal: each card flies out from the Deal button to its place, one after the other, slowing as it lands
+function deal(g, keepCentre) {
+  if (RM.matches) return;
+  const from = $('#redo').getBoundingClientRect(), fx = from.left + from.width / 2, fy = from.top + from.height / 2;
+  [...g.querySelectorAll('.cell')].filter(c => c.firstElementChild).forEach((cell, n) => {
+    if (keepCentre && cell.querySelector('.tile').dataset.i === '0') return;
+    const r = cell.getBoundingClientRect();
+    cell.animate([
+      { transform: `translate(${fx - r.left - r.width / 2}px, ${fy - r.top - r.height / 2}px) scale(0.2) rotate(-16deg)`, opacity: 0 },
+      { opacity: 1, offset: 0.3 },
+      { transform: 'none', opacity: 1 }], { duration: 560, delay: n * 60, easing: 'cubic-bezier(0.16, 1, 0.3, 1)', fill: 'backwards' });
+  });
+}
+function showCard(i) {
+  const el = $(`#grid .tile[data-i="${i}"]`); if (!el) return;
+  cards[i].ready = true;
+  const pix = cards[i].pix;
+  setImg(el.querySelector('img.pic'), cards[i].key, im => {
+    if (!pix || pix.dropped) return false;
+    pix.finish(im, () => im.classList.add('on'));
+    return true;
+  });
+}
+function tileError(i, msg) {
+  const el = $(`#grid .tile[data-i="${i}"]`), pix = cards[i] && cards[i].pix;
+  if (pix) pix.drop();
+  if (!el) return;
+  el.classList.add('err');
+  let w = el.querySelector('.wait');
+  if (!w) { w = document.createElement('span'); w.className = 'wait label'; el.appendChild(w); }
+  w.textContent = msg;
+}
+async function poll() {
+  if (!round) return;
+  const mine = round;
+  let r;
+  try { r = await api('api/round?id=' + round); } catch (e) { status(e.message, true); pollT = setTimeout(poll, 2000); return; }
+  if (mine !== round) return;
+  if (r.cancelled) { setBusy(false); setDirty(true); return status('This deal was stopped before it finished · deal again', true); }
+  let done = 0, drawing = false;
+  const now = performance.now();
+  r.cards.forEach((c, i) => {
+    const card = cards[i], pix = card && card.pix;
+    if (!card) return;
+    if (c.ready) {
+      done++;
+      if (!card.ready) { if (pix && pix.t0) EST.ms = 0.6 * EST.ms + 0.4 * (now - pix.t0); showCard(i); }
+    } else if (c.error) { done++; if (!card.err) { card.err = true; tileError(i, c.error); } }
+    else {  // still to draw: live steps when ComfyUI sends them; otherwise the first one waiting follows the estimate
+      if (pix && c.p != null) { pix.set(0.92 * c.p); if (c.pv) pix.preview(c.pid, c.pv); }
+      else if (pix && !r.live && !drawing && c.pid) { pix.t0 = pix.t0 || now; pix.set(0.9 * Math.min(1, (now - pix.t0) / EST.ms)); }
+      drawing = true;
+    }
+  });
+  if (r.error) { setBusy(false); return status(r.error, true); }
+  if (done < r.cards.length) { status(`Dealing ${done} of ${r.cards.length}`, false, true); pollT = setTimeout(poll, 400); }
+  else { setBusy(false); if (!dirty) status(S.mode === 4 ? 'Take the one you like · arrow keys' : 'Take the one you like · 1–9'); }
+}
+async function stopStep() {
+  clearTimeout(pollT);
+  const mine = round; round = null; setBusy(false);
+  try { await post('api/breed/stop', { round: mine }); } catch {}
+  setDirty(true); status('Stopped · Deal lays this one out again');  // (after: setDirty has its own line)
+}
+const cur = () => S.path[S.path.length - 1];
+function take(c) {
+  // a card you held after this deal was laid out stays held in the hand you take (if that hand still has it)
+  const held = new Set((myHand() || []).filter(x => x.held).map(x => x.cid));
+  (c.inside || []).forEach((x, i) => { if (held.has(x.cid) && c.mix[i]) { x.held = true; c.mix[i].held = true; } });
+  S.path.push({ mix: c.mix, key: c.key, inside: c.inside }); S.path = S.path.slice(-60); save();
+}
+let sweeping = false;
+async function choose(i) {
+  const c = cards[i];
+  if (!c || sweeping) return;
+  if (c.parent) return newRound();
+  if (!c.ready) return status('That card is still face down');
+  await sweep(i);
+  take(c); newRound();
+}
+// taking a card: it slides to the middle of the table while the others are swept away
+async function sweep(i) {
+  const g = $('#grid'), mine = g.querySelector(`.tile[data-i="${i}"]`)?.parentElement, mid = g.querySelector('.tile.here')?.parentElement;
+  if (RM.matches || !mine || !mine.animate) return;
+  sweeping = true;
+  const anims = [];
+  g.querySelectorAll('.cell').forEach((cell, n) => {
+    if (!cell.firstElementChild || cell === mine) return;
+    anims.push(cell.animate([{ transform: 'none', opacity: 1 }, { transform: 'translateY(28px) scale(0.9)', opacity: 0 }],
+      { duration: 260, delay: n * 16, easing: 'ease-in', fill: 'forwards' }));
+  });
+  if (mid && mid !== mine) {
+    const a = mine.getBoundingClientRect(), b = mid.getBoundingClientRect();
+    mine.style.zIndex = 3;
+    anims.push(mine.animate([{ transform: 'none' }, { transform: `translate(${b.left - a.left}px, ${b.top - a.top}px)` }],
+      { duration: 440, easing: 'cubic-bezier(0.16, 1, 0.3, 1)', fill: 'forwards' }));
+  }
+  await Promise.race([Promise.all(anims.map(a => a.finished.catch(() => {}))), new Promise(r => setTimeout(r, 750))]);
+  sweeping = false;
+}
+
+// ---------------------------------------------------------------- the hand, the trail, winnings
+// A hand is the cards (pushes) behind a picture. Each card: where its neurons sit (layout, style, detail), how strong,
+// up or down, and how many neurons. Its emblem is drawn from which neurons it is, so the same card looks the same in
+// every hand. Under the table is your hand, with Hold (deals leave that card alone) and Discard on each card;
+// pointing at a dealt card shows its hand there instead, with what differs from yours marked.
+const SUIT = { layout: 'Layout', style: 'Style', 'fine detail': 'Detail' };
+function emblem(x) {
+  let h = 2166136261;
+  for (const ch of String(x.cid || '')) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+  let r = '';
+  for (let y = 0; y < 5; y++) for (let c = 0; c < 3; c++) {
+    h = (Math.imul(h, 1103515245) + 12345) >>> 0;
+    if ((h >>> 16) & 1) { r += `<rect x="${c}" y="${y}" width="1.02" height="1.02"/>`; if (c < 2) r += `<rect x="${4 - c}" y="${y}" width="1.02" height="1.02"/>`; }
+  }
+  return `<svg class="emb ${x.up ? 'up' : 'dn'}" viewBox="-0.5 -0.5 6 6" aria-hidden="true"><g fill="currentColor">${r}</g></svg>`;
+}
+const neurons = n => n === 1 ? '1 neuron' : `${n} neurons`;
+function cardHTML(x, o = {}) {
+  return `<div class="hc ${o.cls || ''} ${x.held ? 'held' : ''}">
+    <div class="hd">${emblem(x)}<b>${SUIT[x.where] || esc(x.where)} · ${esc(x.power)}</b></div>
+    <div class="sub">${x.up ? 'up' : 'down'} · ${neurons(x.n)}</div>
+    ${o.act != null ? `<div class="acts"><button type="button" data-hold="${o.act}" aria-pressed="${!!x.held}">${x.held ? 'Held' : 'Hold'}</button><button type="button" data-drop="${o.act}">Discard</button></div>`
+      : `<div class="tag">${o.tag || (x.held ? 'held' : '')}</div>`}
+  </div>`;
+}
+function myHand() {
+  const h = cur();
+  if (h.inside && h.inside.length === h.mix.length) return h.inside;
+  return cards[0] && cards[0].parent && cards[0].inside.length === h.mix.length && cards[0].key === h.key ? cards[0].inside : null;
+}
+function drawHand(c) {
+  const box = $('#hand'), h = cur(), mine = myHand();
+  if (!c || c.parent) {
+    $('#handLabel').textContent = 'Your hand';
+    if (!h.mix.length) box.innerHTML = '<span class="empty">No cards yet: this is the plain picture.</span>';
+    else if (!mine) box.innerHTML = `<span class="empty">${h.mix.length} card${h.mix.length > 1 ? 's' : ''}, shown after the next deal.</span>`;
+    else box.innerHTML = mine.map((x, i) => cardHTML(x, { act: i })).join('');
+    box.querySelectorAll('[data-hold]').forEach(b => b.onclick = () => toggleHold(+b.dataset.hold));
+    box.querySelectorAll('[data-drop]').forEach(b => b.onclick = () => discard(+b.dataset.drop));
+    return;
+  }
+  $('#handLabel').textContent = `Card ${c.label}'s hand`;
+  const own = new Map((mine || []).map(x => [x.cid, x])), seen = new Set();
+  let html = (c.inside || []).map(x => {
+    const o = own.get(x.cid); seen.add(x.cid);
+    if (!o) return cardHTML(x, mine ? { cls: 'new', tag: 'new card' } : {});
+    const tag = x.up !== o.up ? 'turned over' : Math.abs(x.s) > Math.abs(o.s) * 1.01 ? 'raised' : Math.abs(x.s) < Math.abs(o.s) * 0.99 ? 'lowered' : '';
+    return cardHTML(x, { cls: tag ? 'chg' : '', tag });
+  }).join('');
+  html += (mine || []).filter(x => !seen.has(x.cid)).map(x => cardHTML(x, { cls: 'gone', tag: 'discarded' })).join('');
+  box.innerHTML = html || '<span class="empty">No cards: the plain picture.</span>';
+}
+function toggleHold(i) {
+  const h = cur(), m = myHand();
+  if (!h.mix[i]) return;
+  if (h.mix[i].held) delete h.mix[i].held; else h.mix[i].held = true;
+  if (m && m[i]) m[i].held = !!h.mix[i].held;
+  save(); drawHand();
+  if (started && !busy) status(h.mix[i].held ? 'Held · deals leave that card alone' : 'Released');
+}
+function discard(i) {
+  const h = cur(), m = myHand();
+  if (!h.mix[i] || sweeping) return;
+  S.path.push({ mix: h.mix.filter((_, j) => j !== i), key: null, inside: m ? m.filter((_, j) => j !== i) : undefined });
+  S.path = S.path.slice(-60); save(); newRound();
+}
+function drawTrail() {
+  const items = S.path.map((p, i) => ({ ...p, i })).filter(p => p.key);
+  $('#trail').innerHTML = items.length ? items.map((p, n) => `<button type="button" data-p="${p.i}" class="${p.i === S.path.length - 1 ? 'cur' : ''}" aria-label="Go back to card ${n + 1}"><img src="${img(p.key)}" alt=""><span class="n">${n + 1}</span></button>`).join('')
+    : '<div class="row dn" style="grid-column:1/-1">No cards taken yet.</div>';
+  $('#trail').querySelectorAll('[data-p]').forEach(b => b.onclick = () => { S.path = S.path.slice(0, +b.dataset.p + 1); save(); newRound(); });
+}
+function insideHTML(c) {
+  if (!c || !c.mix.length) return '<div class="row dn">No cards: the plain picture.</div>';
+  return (c.inside || []).map(x => `<div class="row" style="display:flex;gap:10px;align-items:center">${emblem(x)}<div><span class="${x.up ? 'up' : 'dn'}">${SUIT[x.where] || esc(x.where)} · ${esc(x.power)}</span>
+    <div class="sub">${x.up ? 'up' : 'down'} · ${neurons(x.n)}${x.held ? ' · held' : ''}</div></div></div>`).join('');
+}
+const isFav = k => favs.some(f => f.key === k);
+function toggleFav(c) {
+  if (!c || !c.ready) return status('That card is still face down');
+  if (isFav(c.key)) favs = favs.filter(f => f.key !== c.key);
+  else favs.unshift({ key: c.key, mix: c.mix, inside: c.inside, prompt: promptText(), seed: S.seed, size: c.size || { ...stepSize(), steps: S.steps }, ...reqModel() });
+  store.set('favs', favs); drawFavs();
+  document.querySelectorAll('[data-heart]').forEach(b => b.classList.toggle('on', isFav(cards[+b.dataset.heart]?.key)));
+  $('#zHeart').classList.toggle('on', zoomCard ? isFav(zoomCard.key) : false);
+}
+function drawFavs() {
+  const n = favs.length, c = $('#favCount');
+  c.hidden = !n; c.textContent = n;
+  $('#favs').innerHTML = n ? favs.map((f, i) => `<button type="button" data-f="${i}" aria-label="Open kept picture ${i + 1}"><img src="${img(f.key)}" alt=""></button>`).join('')
+    : '<div class="row dn" style="grid-column:1/-1">Nothing kept yet.</div>';
+  $('#favs').querySelectorAll('[data-f]').forEach(b => b.onclick = () => openZoom({ ...favs[+b.dataset.f], ready: true }));
+}
+
+// ---------------------------------------------------------------- panel
+function openTab(name, keep) {
+  const sheet = $('#sheet'), same = sheet.classList.contains('open') && sheet.dataset.tab === name;
+  if (same && !keep) return closeSheet();
+  document.querySelectorAll('.rail [data-tab]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tab === name)));
+  const swap = sheet.classList.contains('open') && !same;
+  sheet.dataset.tab = name; sheet.classList.add('open');
+  ['tune', 'saved', 'trail'].forEach(t => { $('#tab-' + t).hidden = t !== name; });
+  if (swap) { const a = $('#tab-' + name); a.style.animation = 'none'; void a.offsetWidth; a.style.animation = 'rise 0.3s ease-out both'; }
+  if (name === 'trail') drawTrail();
+  if (name === 'saved') drawFavs();
+}
+function closeSheet() {
+  $('#sheet').classList.remove('open');
+  document.querySelectorAll('.rail [data-tab]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+}
+document.querySelectorAll('.rail [data-tab]').forEach(b => b.onclick = () => { if (railDragged) return; openTab(b.dataset.tab); });
+document.querySelectorAll('[data-close]').forEach(b => b.onclick = closeSheet);
+
+// panel width: drag its left edge, or grab the rail and pull (left = wider; far right = shut). Remembered.
+const SHEET_MIN = 280, sheetMax = () => Math.max(SHEET_MIN, Math.min(760, innerWidth * 0.62));
+let sheetW = Math.min(sheetMax(), Math.max(SHEET_MIN, +store.get('sheetW', 340) || 340)), railDragged = false;
+$('#sheet').style.setProperty('--w', sheetW + 'px');
+function setSheetW(w) {
+  sheetW = Math.min(sheetMax(), Math.max(SHEET_MIN, w)); store.set('sheetW', sheetW);
+  $('#sheet').style.setProperty('--w', sheetW + 'px');
+}
+function dragSheet(ev) {
+  if (ev.button !== 0 || matchMedia('(max-width: 820px)').matches) return;
+  const sheet = $('#sheet'), rail = $('.rail'), x0 = ev.clientX;
+  const open0 = sheet.classList.contains('open'), w0 = open0 ? sheet.getBoundingClientRect().width : 0;
+  let moved = false, w = w0;
+  const move = e => {
+    const dx = x0 - e.clientX;
+    if (!moved) {
+      if (Math.abs(dx) < 5) return;
+      moved = true; railDragged = true; sheet.classList.add('dragging'); rail.classList.add('dragging'); document.body.style.userSelect = 'none';
+      if (!open0) openTab(sheet.dataset.tab || 'tune', true);
+    }
+    w = Math.max(0, Math.min(sheetMax(), w0 + dx));
+    sheet.style.width = w + 'px';
+    sheet.style.setProperty('--w', Math.max(SHEET_MIN, w) + 'px');
+    sheet.classList.toggle('closing', w < SHEET_MIN - 60);
+  };
+  const up = () => {  // (listening on the window: a quick drag leaves the thin edge at once)
+    removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up);
+    setTimeout(() => { railDragged = false; }, 0);  // the click that ends a drag doesn't toggle a tab
+    if (!moved) return;
+    sheet.classList.remove('dragging', 'closing'); rail.classList.remove('dragging'); document.body.style.userSelect = '';
+    sheet.style.width = '';
+    if (w < SHEET_MIN - 60) { $('#sheet').style.setProperty('--w', sheetW + 'px'); closeSheet(); } else setSheetW(w);
+  };
+  addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up);
+}
+$('#grip').addEventListener('pointerdown', dragSheet);
+$('.rail').addEventListener('pointerdown', ev => { if (!ev.target.closest('a, #back, #reseed, #restart')) dragSheet(ev); });  // empty rail or Tune/Saved/Inside
+$('#grip').addEventListener('keydown', ev => {
+  if (ev.key === 'ArrowLeft') { ev.preventDefault(); setSheetW(sheetW + 24); }
+  if (ev.key === 'ArrowRight') { ev.preventDefault(); if (sheetW <= SHEET_MIN) closeSheet(); else setSheetW(sheetW - 24); }
+});
+addEventListener('resize', () => { if (sheetW > sheetMax()) setSheetW(sheetMax()); });
+
+// winnings: picture size
+(function () {
+  const v = Math.min(300, Math.max(56, +store.get('favSize', 96) || 96));
+  $('#favSize').value = v; $('#favs').style.setProperty('--fav', v + 'px');
+  $('#favSize').oninput = () => { $('#favs').style.setProperty('--fav', $('#favSize').value + 'px'); store.set('favSize', +$('#favSize').value); };
+})();
+function drawMotion() { document.querySelectorAll('#motionSeg [data-motion]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.motion === (RM.matches ? 'off' : 'on')))); }
+document.querySelectorAll('#motionSeg [data-motion]').forEach(b => b.onclick = () => {
+  store.set('motion', b.dataset.motion); document.documentElement.classList.toggle('still', RM.matches); drawMotion();
+});
+drawMotion();
+
+// ---------------------------------------------------------------- close-up
+function openZoom(c) {
+  if (!c.ready) return status('That card is still face down');
+  zoomCard = c;
+  $('#zImg').src = img(c.key); $('#zInside').innerHTML = insideHTML(c);
+  $('#zMsg').textContent = ''; $('#zMsg').className = '';
+  $('#zHeart').classList.toggle('on', isFav(c.key));
+  $('#zGo').hidden = !c.mix.length;
+  $('#zoom').classList.add('on'); $('#zClose').focus();
+}
+function closeZoom() { $('#zoom').classList.remove('on'); zoomCard = null; dropSpirals('#zPic'); }
+$('#zClose').onclick = closeZoom;
+$('#zoom').onclick = ev => { if (ev.target.id === 'zoom') closeZoom(); };
+$('#zHeart').onclick = () => toggleFav(zoomCard);
+$('#zGo').onclick = () => { const c = zoomCard; closeZoom(); take(c); newRound(); };
+$('#zFull').onclick = async () => {
+  const c = zoomCard, m = $('#zMsg');
+  const fs = { ...finalFor(c.size), steps: fullSteps(c.size && c.size.steps) };
+  m.className = ''; m.textContent = `Drawing at ${fs.w} × ${fs.h}…`;
+  dropSpirals('#zPic');
+  const pix = new Pix($('#zPic'), { hollow: true }), two = c.mix.length > 0;  // plain picture first, then the pushed one
+  const t0 = performance.now(), est = secsFor(fs, fs.steps) * 1000 * (two ? 2 : 1);
+  try {
+    if (!(await modelReady(setupOf(c).ckpt, t => { m.textContent = t; }))) return pix.drop();
+    m.textContent = `Drawing at ${fs.w} × ${fs.h}…`;
+    const { job } = await post('api/generate', { mix: c.mix, prompt: c.prompt || promptText(), seed: c.seed ?? S.seed, size: fs, ...setupOf(c) });
+    for (;;) {
+      await new Promise(r => setTimeout(r, 450));
+      const j = await api('api/job?id=' + job);
+      if (j.state === 'error') throw new Error(j.error);
+      if (j.p != null) { const p = 0.92 * j.p; pix.set(two ? (j.base ? 0.5 + 0.5 * p : 0.5 * p) : p); if (j.pv) pix.preview(j.pid, j.pv); }
+      else if (!j.live) pix.set(0.9 * Math.min(1, (performance.now() - t0) / est));
+      if (j.state === 'done') {
+        c.full = j.push;
+        if (zoomCard === c) {
+          const im = new Image();
+          im.onload = () => pix.finish(im, () => { $('#zImg').src = im.src; });
+          im.onerror = () => { pix.drop(); $('#zImg').src = im.src; };
+          im.src = img(j.push || j.base);
+        } else pix.drop();
+        m.textContent = 'Full size done. Cashing out now uses it as the LoRA preview.'; break;
+      }
+    }
+  } catch (e) { pix.drop(); m.textContent = e.message; }
+};
+$('#zSave').onclick = async () => {
+  const c = zoomCard, m = $('#zMsg');
+  if (!c.mix.length) return (m.textContent = 'This card has an empty hand: nothing to cash out.');
+  const name = $('#zName').value.trim() || 'breed_' + new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  m.className = ''; m.textContent = 'Saving…';
+  try {
+    if (!(await modelReady(setupOf(c).ckpt, t => { m.textContent = t; }))) return;
+    m.textContent = 'Saving…';
+    const full = !!c.full, fs = full ? { ...finalFor(c.size), steps: fullSteps(c.size && c.size.steps) } : (c.size || { ...stepSize(), steps: S.steps });
+    const r = await post('api/save', { mix: c.mix, name, prompt: c.prompt || promptText(), seed: c.seed ?? S.seed, render: c.full || c.key, size: fs, ...setupOf(c) });
+    m.className = 'good'; m.textContent = `Cashed out. In ComfyUI's LoRA list it is ${r.lora_name}, strength 1.`;
+  } catch (e) { m.textContent = e.message; }
+};
+
+// ---------------------------------------------------------------- controls
+// prompt presets: the built-in pictures, then yours (saved from the box). Picking one types it into the box.
+let mine = store.get('myprompts', []);
+if (!Array.isArray(mine)) mine = [];
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+const myOf = p => typeof p === 'string' && p.startsWith('my:') ? mine.find(m => 'my:' + m.id === p) : null;
+const presetText = p => typeof p === 'number' ? prompts[p]?.text : myOf(p)?.text;
+function guessName(t) {
+  const words = t.replace(/\b(masterpiece|best quality|newest|absurdres|highres|safe|high contrast|very aesthetic|amazing quality)\b,?/gi, '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  return (words.slice(0, 3).join(', ') || 'my prompt').slice(0, 30);
+}
+function drawPresets() {
+  $('#presets').innerHTML = prompts.map((p, i) => `<button type="button" class="chip" data-pre="${i}" aria-pressed="${S.preset === i}">${esc(p.name)}</button>`).join('')
+    + mine.map(m => `<button type="button" class="chip mine" data-pre="my:${m.id}" aria-pressed="${S.preset === 'my:' + m.id}" title="${esc(m.text)}">${esc(m.name)}<span class="del" data-del="${m.id}" title="Delete this preset" aria-hidden="true">${ic('close')}</span></button>`).join('')
+    + `<button type="button" class="chip" data-pre="custom" aria-pressed="${S.preset === 'custom'}">Your own…</button>`
+    + `<button type="button" class="chip add" id="addPrompt" title="Keep the prompt in the box as a preset">＋ Save prompt</button>`
+    + `<button type="button" class="chip size" id="sizeBtn" title="Picture shape and size"></button>`;
+  paintIcons($('#presets'));
+  $('#sizeBtn').onclick = () => { if (!($('#sheet').classList.contains('open') && $('#sheet').dataset.tab === 'tune')) openTab('tune'); $('#sizeSec').scrollIntoView({ block: 'start' }); };
+  $('#addPrompt').onclick = startSaving;
+  drawSizeBtn();
+  $('#presets').querySelectorAll('[data-pre]').forEach(b => b.onclick = ev => {
+    const del = ev.target.closest('[data-del]');
+    if (del) return askDelete(del);
+    const p = b.dataset.pre;
+    S.preset = p === 'custom' ? 'custom' : p.startsWith('my:') ? p : +p;
+    if (S.preset === 'custom') typeInto(S.customPrompt || '', true); else typeInto(presetText(S.preset) || '');
+    save(); drawPresets(); where(); setDirty(true);
+  });
+  $('#presets').querySelectorAll('.chip.mine').forEach(b => b.onkeydown = ev => {  // keyboard: Delete removes a preset
+    if (ev.key === 'Delete') { ev.preventDefault(); askDelete(b.querySelector('[data-del]')); }
+  });
+}
+function askDelete(el) {  // two clicks: the first asks
+  if (!el.classList.contains('sure')) {
+    el.classList.add('sure'); el.textContent = 'delete?';
+    setTimeout(() => { if (el.isConnected && el.classList.contains('sure')) drawPresets(); }, 2600);
+    return;
+  }
+  const id = el.dataset.del, gone = mine.find(m => m.id === id);
+  mine = mine.filter(m => m.id !== id); store.set('myprompts', mine);
+  if (S.preset === 'my:' + id) { S.preset = 'custom'; S.customPrompt = promptText(); save(); where(); }
+  drawPresets(); status(`Deleted “${gone ? gone.name : 'preset'}”`);
+}
+function startSaving() {
+  const text = promptText();
+  if (!text) return status('Write a prompt first, then save it', true);
+  const same = mine.find(m => m.text === text);
+  if (same) { S.preset = 'my:' + same.id; save(); drawPresets(); where(); return status(`Already saved as “${same.name}”`); }
+  const inp = document.createElement('input');
+  inp.className = 'named'; inp.maxLength = 40; inp.value = guessName(text); inp.setAttribute('aria-label', 'Name for this preset, then Enter');
+  $('#addPrompt').replaceWith(inp); inp.focus(); inp.select();
+  let over = false;
+  const finish = ok => {
+    if (over) return; over = true;
+    if (ok) {
+      const name = inp.value.trim() || guessName(text), id = Math.random().toString(36).slice(2, 9);
+      mine.push({ id, name, text }); store.set('myprompts', mine);
+      S.preset = 'my:' + id; save(); where(); status(`Saved “${name}” · it's with the presets now`);
+    }
+    drawPresets();
+  };
+  inp.onkeydown = ev => { if (ev.key === 'Enter') { ev.preventDefault(); finish(true); } else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); } };
+  inp.onblur = () => finish(inp.value.trim() !== '');
+}
+
+// typing a preset into the box: what differs from the current text is erased (quick, easing out), then the new text
+// is typed with an ease-in, slow at first and faster toward the end. Clicking into the box finishes it at once.
+let typing = null;
+function typeInto(text, focusAfter) {
+  const el = $('#prompt');
+  if (typing) typing.stop();
+  const from = el.value;
+  let common = 0;
+  while (common < from.length && common < text.length && from[common] === text[common]) common++;
+  const eraseN = from.length - common, typeN = text.length - common;
+  const end = () => { el.value = text; el.classList.remove('typing'); typing = null; S.prompt = text; save(); fitPrompt(); if (focusAfter) el.focus(); };
+  if (RM.matches || (!eraseN && !typeN)) return end();
+  const eraseMs = eraseN ? Math.min(380, 100 + eraseN * 1.2) : 0, typeMs = typeN ? Math.min(1600, 380 + typeN * 4.5) : 0;
+  const t0 = performance.now();
+  let raf = 0;
+  el.classList.add('typing');
+  const step = now => {
+    const t = now - t0;
+    if (t < eraseMs) { const k = t / eraseMs; el.value = from.slice(0, common + Math.round(eraseN * (1 - k * (2 - k)))); }
+    else {
+      const k = Math.min(1, (t - eraseMs) / Math.max(1, typeMs));
+      el.value = text.slice(0, common + Math.round(typeN * Math.pow(k, 2.2)));
+      if (k >= 1) return end();
+    }
+    fitPrompt(true); el.scrollTop = el.scrollHeight;
+    raf = requestAnimationFrame(step);
+  };
+  typing = { stop() { cancelAnimationFrame(raf); end(); } };
+  raf = requestAnimationFrame(step);
+}
+// the box grows upward to show the whole prompt while you are in it (or while it is being typed)
+let fitT = 0;
+function fitPrompt(grow) {
+  const el = $('#prompt'), active = grow || document.activeElement === el;
+  clearTimeout(fitT);
+  if (!active) { fitT = setTimeout(() => { if (document.activeElement !== el && !typing) { el.style.height = ''; el.scrollTop = 0; } }, typing ? 0 : 700); return; }
+  if (el.scrollHeight > el.clientHeight + 1) el.style.height = Math.min(230, el.scrollHeight + 2) + 'px';
+}
+$('#prompt').addEventListener('focus', () => { if (typing) typing.stop(); fitPrompt(); });
+$('#prompt').addEventListener('pointerdown', () => { if (typing) typing.stop(); });
+$('#prompt').addEventListener('blur', () => fitPrompt());
+$('#prompt').oninput = () => {
+  if (S.preset !== 'custom' && promptText() !== presetText(S.preset)) { S.preset = 'custom'; drawPresets(); where(); }
+  if (S.preset === 'custom') S.customPrompt = promptText();
+  S.prompt = promptText(); fitPrompt();
+  save(); setDirty(true);
+};
+$('#prompt').onkeydown = ev => { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); $('#prompt').blur(); newRound(); } };
+$('#wild').oninput = () => { if (S.polish) S.fine = +$('#wild').value; else S.wild = +$('#wild').value; save(); setDirty(true); };
+function showPolish() {
+  document.querySelectorAll('.seg [data-p]').forEach(x => x.setAttribute('aria-pressed', String((+x.dataset.p === 1) === S.polish)));
+  $('#wLo').textContent = S.polish ? 'tiny' : 'low stakes'; $('#wHi').textContent = S.polish ? 'bigger' : 'high';
+  $('#wild').value = S.polish ? S.fine : S.wild;
+  $('#wild').title = S.polish ? 'How big each change to a card is: tiny ≈ 6%, bigger ≈ 30%' : 'Stakes: low = one card changes a little; high = remixes and whole new hands, and more pictures that break';
+}
+document.querySelectorAll('.seg [data-p]').forEach(b => b.onclick = () => {
+  S.polish = b.dataset.p === '1'; save(); showPolish(); where();
+  if (S.polish && !cur().mix.length) return status('Take a card first, then refine its hand', true);
+  if (!started) return showStart();  // before the first step: a setting, not a start
+  newRound();
+});
+document.querySelectorAll('.seg [data-m]').forEach(b => b.onclick = () => {
+  S.mode = +b.dataset.m; save(); drawSize();
+  document.querySelectorAll('.seg [data-m]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  if (!started) return showStart();  // (the start card says how many it will draw)
+  newRound();
+});
+$('#redo').onclick = () => busy ? stopStep() : newRound();
+$('#reseed').onclick = () => { S.seed = Math.floor(Math.random() * 1e9); save(); newRound(); };
+$('#back').onclick = () => { if (S.path.length > 1) { S.path.pop(); save(); newRound(); } };
+$('#restart').onclick = () => { S.path = [{ mix: [], key: null }]; S.polish = false; save(); showPolish(); newRound(); };
+function knobLabel(k, v) { return k === 'depth' ? (v < 0.4 ? 'layout' : v < 0.88 ? 'style' : 'fine detail') : ''; }
+function drawKnobs() {
+  const d = (META && META.knobs) || {};
+  $('#knobs').innerHTML = KNOB_UI.map(([k, t, lo, hi]) => {
+    const v = S.knobs[k] ?? d[k] ?? 0.5;
+    return `<div class="knob"><div class="t"><label for="k-${k}">${t}</label><span>${knobLabel(k, v)}</span></div>
+      <input id="k-${k}" type="range" min="0" max="1" step="0.05" value="${v}" data-k="${k}"><div class="ends"><span>${lo}</span><span>${hi}</span></div></div>`;
+  }).join('');
+  $('#knobs').querySelectorAll('[data-k]').forEach(r => {
+    r.oninput = () => { S.knobs[r.dataset.k] = +r.value; save(); setDirty(true); r.parentElement.querySelector('.t span').textContent = knobLabel(r.dataset.k, +r.value); };
+    r.ondblclick = () => { delete S.knobs[r.dataset.k]; save(); drawKnobs(); setDirty(true); };
+  });
+}
+$('#kReset').onclick = () => { S.knobs = {}; save(); drawKnobs(); setDirty(true); };
+const opt = (v, t) => `<option value="${esc(v)}">${esc(t ?? v)}</option>`;
+async function fillModels() {
+  const m = await api('api/models');
+  const ck = m.checkpoints;
+  $('#ckpt').innerHTML = ck.length ? ck.map(n => opt(n, n.replace(/\.safetensors$/, ''))).join('') : opt('', 'No .safetensors checkpoints in ComfyUI');
+  $('#vae').innerHTML = opt('checkpoint', "VAE: the checkpoint's own") + m.vae.map(n => opt(n, 'VAE: ' + n.replace(/\.safetensors$/, ''))).join('');
+  if (!S.ckpt || !ck.includes(S.ckpt)) S.ckpt = ck[0] || '';
+  if (S.vae == null || (S.vae !== 'checkpoint' && !m.vae.includes(S.vae))) S.vae = 'checkpoint';
+  if (!m.samplers.includes(S.sampler)) S.sampler = m.samplers.includes(META.draw.sampler) ? META.draw.sampler : m.samplers[0];
+  if (!m.schedulers.includes(S.scheduler)) S.scheduler = m.schedulers.includes(META.draw.scheduler) ? META.draw.scheduler : m.schedulers[0];
+  $('#sampler').innerHTML = m.samplers.map(n => opt(n)).join(''); $('#scheduler').innerHTML = m.schedulers.map(n => opt(n)).join('');
+  $('#ckpt').value = S.ckpt; $('#vae').value = S.vae; $('#sampler').value = S.sampler; $('#scheduler').value = S.scheduler; save();
+}
+// A checkpoint's weights are read once before its first picture. This waits for that, showing how far it is.
+// -> true when the checkpoint can be drawn with; false (with the reason shown) when it can't.
+async function modelReady(name, say) {
+  name = name || S.ckpt;
+  const tell = say || ((t, err) => status(t, err, !err)), bar = $('#readBar'), short = String(name).replace(/\.safetensors$/, '');
+  if (!name) { tell('ComfyUI has no .safetensors checkpoint to draw with', true); return false; }
+  try {
+    for (;;) {
+      const r = await api('api/model?ckpt=' + encodeURIComponent(name));
+      if (!r.ok || r.error) { bar.hidden = true; tell(r.error || 'That checkpoint could not be read', true); return false; }
+      if (r.ready) { bar.hidden = true; return true; }
+      bar.hidden = false; bar.firstElementChild.style.width = Math.round(r.p * 100) + '%';
+      tell(`Reading ${short} for the first time · ${Math.round(r.p * 100)}%`);
+      await new Promise(res => setTimeout(res, 500));
+    }
+  } catch (e) { bar.hidden = true; tell(e.message, true); return false; }
+}
+$('#ckpt').onchange = async () => {
+  const prev = S.ckpt, name = $('#ckpt').value;
+  if (!(await modelReady(name))) { $('#ckpt').value = prev; return; }
+  S.ckpt = name; save(); setDirty(true);
+  if (!started) status('');
+};
+$('#vae').onchange = () => { S.vae = $('#vae').value; save(); setDirty(true); };
+$('#sampler').onchange = () => { S.sampler = $('#sampler').value; save(); setDirty(true); };
+$('#scheduler').onchange = () => { S.scheduler = $('#scheduler').value; save(); setDirty(true); };
+$('#neg').oninput = () => { S.negative = $('#neg').value; save(); setDirty(true); };
+$('#steps').onchange = () => { S.steps = Math.min(60, Math.max(1, Math.round(+$('#steps').value) || META.draw.steps)); $('#steps').value = S.steps; save(); drawSize(); setDirty(true); };
+$('#cfg').onchange = () => { S.cfg = Math.min(30, Math.max(1, +$('#cfg').value || META.draw.cfg)); $('#cfg').value = S.cfg; save(); setDirty(true); };
+function drawDraw() {
+  if (typeof S.negative !== 'string') S.negative = META.draw.negative;
+  if (!(S.steps >= 1)) S.steps = META.draw.steps;
+  if (!(S.cfg >= 1)) S.cfg = META.draw.cfg;
+  $('#neg').value = S.negative; $('#steps').value = S.steps; $('#cfg').value = S.cfg;
+}
+// ComfyUI: found by itself on its usual ports; the address field is for one that lives elsewhere on this PC
+function comfyNote(m) {
+  $('#comfyNote').textContent = m.comfy ? `Connected to ${m.comfy_url}.` : `Not running. Looked at ${m.comfy_tried.join(' and ')}.`;
+}
+$('#comfyUrl').onchange = async () => {
+  try { const r = await post('api/settings', { comfy: $('#comfyUrl').value.trim() }); comfyNote(r); if (r.comfy && !META.comfy) connect(); }
+  catch (e) { $('#comfyNote').textContent = e.message; }
+};
+addEventListener('keydown', ev => {
+  if (ev.target && ev.target.matches && ev.target.matches('input, textarea, select')) return;
+  if (ev.key === 'Escape') { if ($('#zoom').classList.contains('on')) return closeZoom(); if ($('#sheet').classList.contains('open')) return openTab($('#sheet').dataset.tab); return; }
+  if ($('#zoom').classList.contains('on')) return;
+  const L = LAYOUT[S.mode];
+  if (S.mode === 4 && ev.key in CROSS_KEYS) { ev.preventDefault(); choose(L[CROSS_KEYS[ev.key]]); }
+  else if (S.mode === 8 && /^[1-9]$/.test(ev.key)) choose(L[+ev.key - 1]);
+  else if (ev.key === ' ' && !(ev.target && ev.target.closest && ev.target.closest('button'))) { ev.preventDefault(); busy ? stopStep() : newRound(); }
+  else if (ev.key === 'Backspace') { ev.preventDefault(); $('#back').click(); }
+  else if ((ev.key === 'f' || ev.key === 'F') && hover != null) toggleFav(cards[hover]);
+});
+
+(async function boot() {
+  paintIcons();
+  status('Loading', false, true);
+  try { META = await api('api/meta'); } catch (e) { return status(e.message, true); }
+  prompts = META.prompts;
+  if (typeof S.preset === 'number' && !prompts[S.preset]) S.preset = 0;
+  if (typeof S.preset === 'string' && S.preset !== 'custom' && !myOf(S.preset)) S.preset = 'custom';
+  $('#prompt').value = S.prompt || (S.preset === 'custom' ? (S.customPrompt || '') : presetText(S.preset) || '');
+  drawDraw(); drawPresets(); showPolish(); drawKnobs(); drawFavs(); drawSize(); applyShape(); where();
+  document.querySelectorAll('.seg [data-m]').forEach(x => x.setAttribute('aria-pressed', String(+x.dataset.m === S.mode)));
+  $('#comfyUrl').value = META.comfy_set || '';
+  $('#comfySec').hidden = !!META.embedded;  // inside ComfyUI there is no address to set: it is the one we run in
+  connect(META);
+})();
+// ComfyUI draws the pictures. Until it answers, say so and keep looking; once it does, list its models and wait to be
+// asked for the first step (nothing draws by itself).
+let connectT = 0;
+async function connect(known) {
+  clearTimeout(connectT);
+  const later = t => { status(t, true); connectT = setTimeout(connect, 3000); };
+  let m = known && 'comfy' in known ? known : null;
+  try { m = m || await api('api/meta'); } catch (e) { return later(e.message); }
+  META.comfy = m.comfy; META.comfy_url = m.comfy_url; comfyNote(m);
+  if (!started && $('#start').hidden) showStart();  // the table is laid out (your hand, where you left off) even while ComfyUI is away
+  if (!m.comfy) return later('ComfyUI is not running · start it and this page carries on');
+  try { await fillModels(); } catch (e) { return later(e.message); }
+  if (!started) status(store.get('seen', false) ? 'Paused' : '');
+}
+</script>
+</body>
+</html>

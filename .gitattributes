@@ -1,0 +1,5 @@
+# keep shell scripts with Unix line endings on every system, so start.sh runs on Mac and Linux
+* text=auto
+*.sh text eol=lf
+*.bat text eol=crlf
+*.png binary

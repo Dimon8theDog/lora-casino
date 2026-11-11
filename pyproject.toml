@@ -1,0 +1,17 @@
+[project]
+name = "lora-casino"
+description = "Deal pictures, take the one you like, and cash its hand out as a LoRA. Works with any SDXL checkpoint, no training."
+version = "0.1.0"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+# numpy is the only thing it needs, and ComfyUI already has it
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Dimon8theDog/lora-casino"
+
+# For ComfyUI's registry (not needed for GitHub): a PublisherId goes here.
+[tool.comfy]
+PublisherId = ""
+DisplayName = "LoRA Casino"
+Icon = ""

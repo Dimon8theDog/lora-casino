@@ -1,0 +1,5 @@
+# made while running on its own: pictures, saved looks, per-checkpoint numbers, settings
+data/
+.venv/
+__pycache__/
+*.pyc
