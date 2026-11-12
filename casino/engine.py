@@ -1,11 +1,25 @@
 """The game itself, with no ComfyUI in it (numpy only): hands of cards, the moves a deal makes, and turning a hand
 into LoRA weights.
 
-A hand (mix) = list of cards {ids: [global neuron ids], s: strength, label, kind, center, held?}. Each neuron of a
-card is moved by s x its typical activation size (weights.py works that out from the checkpoint). Why a LoRA can hold
-a hand exactly: a push adds a fixed vector d to the input of a feed-forward output layer (ff.net.2: out = W x + b),
-and W (x + d) + b = W x + (b + W d), so the push is the same as changing that layer's bias by W d. That is saved as
-standard 'diff_b' LoRA keys, which ComfyUI's LoRA loaders apply. Strength 1 = the picture; it is linear.
+A hand (mix) = list of cards {ids: [global neuron ids], s: strength, label, kind, center, held?}. The neurons of a
+card sit in one feed-forward layer, and what a push does depends on that layer (families.py says which is which):
+
+  "bias"   (SDXL, Anima's text adapter)  the neurons are moved by a fixed amount d each (weights.py works out each
+           one's typical activation size from the checkpoint; d is a multiple of it). A push adds a fixed vector d to
+           the input of the layer's output weight (out = W x + b), and W (x + d) + b = W x + (b + W d), so the push is
+           the same as changing that layer's bias by W d. Saved as a standard 'diff_b' LoRA key. Exact.
+  "group"  (Anima's blocks, which have no bias)  the card's neurons get one shared push along m, the average of what
+           they write: out = W x + a m (c . x), with c_i = how much of m neuron i writes. That is a rank-1 change of W,
+           saved as ordinary lora_up / lora_down keys. For one neuron it is exactly "this neuron, (1 + a) times as
+           loud"; for many it is the part of that which the neurons agree on.
+
+What the strength s counts:
+  SDXL    each neuron is moved by s x its typical activation.
+  Anima   the whole push is s x the size of its layer's whole output (St["unit"], see weights.anima_block). The same
+          s then means about the same on any card: on the first 24 cards tried, pictures stayed whole below about
+          1.8 and broke more and more often above 2.
+
+Either way ComfyUI's LoRA loaders apply the file, strength 1 = the picture, and it is linear.
 
 W is the checkpoint's own, so a saved LoRA is exact on the checkpoint it was made with and close on its relatives.
 """
@@ -18,24 +32,17 @@ import zlib
 
 import numpy as np
 
-from . import weights
-
-# SDXL's own structure (the same in every SDXL checkpoint): the middle of the decoder sets the look, its last,
-# high-resolution blocks paint fine detail, everything before lays the picture out
-STYLE_BLOCKS = ("output_blocks.0.1", "output_blocks.1.1", "output_blocks.2.1")
-
-
-DETAIL_BLOCKS = ("output_blocks.3.1", "output_blocks.4.1", "output_blocks.5.1")
-
-
-DEFAULT_S = {1: 300.0, 10: 100.0, 100: 60.0, 1000: 6.0}   # push strengths (x typical activation) that show in a picture
+from . import families, weights
 
 
 def where(St, li):
-    b = St["blocks"][li]
-    if b in STYLE_BLOCKS:
-        return "style"
-    return "fine detail" if b.startswith("output_blocks") else "layout"
+    """The suit of layer li's cards: SDXL layout / style / fine detail, Anima prompt / layout / subject / rendering."""
+    return St["zone"][li]
+
+
+def base_s(St, g, size):
+    """How strong a fresh card of this size starts in the layer of neuron g."""
+    return St["s0"][int(St["layer"][int(g)])][size]
 
 
 def label_ids(St, g):
@@ -63,7 +70,7 @@ def pick(St, size, seed_g=None, rng=None, sign=None):
     else:
         ids, label, kind = np.array([g]), label_ids(St, g), "neuron"
     return {"ids": [int(i) for i in ids], "label": label, "kind": kind, "center": g,
-            "s": sign * DEFAULT_S[1000 if size >= 1000 else 100 if size >= 100 else 10 if size >= 10 else 1]}
+            "s": sign * base_s(St, g, 1000 if size >= 1000 else 100 if size >= 100 else 10 if size >= 10 else 1)}
 
 
 def near(St, g, rng=None):
@@ -91,15 +98,33 @@ def clean_mix(mix, N=None):
     return out
 
 
+def _by_layer(St, m):
+    """A card's neurons, layer by layer: [(layer, global ids there)]."""
+    ids = np.array(m["ids"])
+    return [(int(li), ids[St["layer"][ids] == li]) for li in np.unique(St["layer"][ids])]
+
+
 def shifts(St, mix):
-    """{layer: dense shift vector} for a mix."""
+    """{layer: dense shift vector} for the cards of a mix whose strength is a multiple of each neuron's typical
+    activation (SDXL)."""
     out = {}
     for m in mix:
-        ids = np.array(m["ids"])
-        for li in np.unique(St["layer"][ids]):
-            sel = ids[St["layer"][ids] == li]
-            v = out.setdefault(int(li), np.zeros(St["inner"][int(li)], np.float32))
+        for li, sel in _by_layer(St, m):
+            if St["unit"][li] > 0:
+                continue
+            v = out.setdefault(li, np.zeros(St["inner"][li], np.float32))
             np.add.at(v, St["idx"][sel].astype(np.int64), m["s"] * St["absB"][sel])
+    return out
+
+
+def sized(St, mix):
+    """{layer: [(neuron numbers in the layer, strength)]} for the cards whose strength is counted against their layer's
+    whole output (Anima)."""
+    out = {}
+    for m in mix:
+        for li, sel in _by_layer(St, m):
+            if St["unit"][li] > 0:
+                out.setdefault(li, []).append((np.sort(St["idx"][sel].astype(np.int64)), float(m["s"])))
     return out
 
 
@@ -107,23 +132,58 @@ _W = {}
 
 
 def weight(St, li, ckpt):
-    """FF output weight of layer li from the checkpoint (a few layers kept in memory)."""
+    """Output weight of layer li's feed-forward from the checkpoint (a few layers kept in memory)."""
     key = (str(ckpt), li)
     if key not in _W:
         if len(_W) > 16:
             _W.pop(next(iter(_W)))
-        base = St["names"][li] + ".ff"
-        _W[key] = (base, weights.tensor(ckpt, f"{weights.PREFIX}{base}.net.2.weight"))
+        _W[key] = weights.tensor(ckpt, St["wkey"][li])
     return _W[key]
 
 
 def lora_tensors(St, mix, ckpt):
     out, info = {}, []
     for li, v in sorted(shifts(St, mix).items()):
-        base, W = weight(St, li, ckpt)
-        db = W @ v
-        out[f"lora_unet_{(base + '.net.2').replace('.', '_')}.diff_b"] = db.astype(np.float32)
-        info.append({"layer": li, "name": base, "neurons": int((v != 0).sum()), "bias_change_norm": round(float(np.linalg.norm(db)), 3)})
+        db = weight(St, li, ckpt) @ v
+        out[f"{St['lora'][li]}.diff_b"] = db.astype(np.float32)
+        info.append({"layer": li, "name": St["names"][li], "neurons": int((v != 0).sum()), "bias_change_norm": round(float(np.linalg.norm(db)), 3)})
+    for li, cards in sorted(sized(St, mix).items()):
+        W = weight(St, li, ckpt)
+        a0, unit = int(St["off"][li]), float(St["unit"][li])
+        if St["push"][li] == "bias":  # the bias moves s x the layer's whole output, along what the card's neurons write
+            db = np.zeros(W.shape[0], np.float64)
+            for idx, s in cards:
+                v = W[:, idx].astype(np.float64) @ St["absB"][a0 + idx]
+                db += s * unit * v / max(float(np.linalg.norm(v)), 1e-12)
+            out[f"{St['lora'][li]}.diff_b"] = db.astype(np.float32)
+            info.append({"layer": li, "name": St["names"][li], "neurons": int(sum(len(i) for i, _ in cards)), "cards": len(cards),
+                         "bias_change_norm": round(float(np.linalg.norm(db)), 3)})
+            continue
+        gate = St["gate"][li][:W.shape[0]]
+        up, down, factors = [], [], []
+        for idx, s in cards:
+            m = W[:, idx].mean(axis=1)                      # what these neurons write on average
+            mm = float(m @ m)
+            if mm < 1e-12:
+                continue
+            c = (W[:, idx].T @ m) / mm                      # how much of m each of them writes
+            # how big the push is for factor 1, against the block's whole output: its steady part and the part that
+            # changes from place to place in the picture, from each neuron's estimated mean activation and variance
+            e, var = St["act"][a0 + idx], St["var"][a0 + idx]
+            u = float(np.linalg.norm(gate * m)) * float(np.sqrt((c @ e) ** 2 + (c * c) @ var)) / unit
+            a = float(np.clip(s / max(u, 1e-9), -1e4, 1e4))
+            row = np.zeros(W.shape[1], np.float32)
+            row[idx] = a * c
+            up.append(m)
+            down.append(row)
+            factors.append(round(a, 3))
+        if not up:
+            continue
+        out[f"{St['lora'][li]}.lora_up.weight"] = np.stack(up, axis=1).astype(np.float32)
+        out[f"{St['lora'][li]}.lora_down.weight"] = np.stack(down, axis=0)
+        out[f"{St['lora'][li]}.alpha"] = np.array(float(len(up)), np.float32)       # alpha / rank = 1: applied as written
+        info.append({"layer": li, "name": St["names"][li], "neurons": int(sum(len(i) for i, _ in cards)), "cards": len(up),
+                     "factors": factors})
     return out, info
 
 
@@ -143,6 +203,9 @@ def mix_key(St, mix):
     for li, v in sorted(shifts(St, mix).items()):
         nz = np.nonzero(v)[0]
         h.update(f"{li}:".encode() + nz.astype(np.int32).tobytes() + np.round(v[nz], 4).astype(np.float32).tobytes())
+    for li, cards in sorted(sized(St, mix).items()):
+        for idx, s in sorted(cards, key=lambda c: (c[0].tobytes(), c[1])):
+            h.update(f"u{li}:{round(s, 4)}:".encode() + idx.astype(np.int32).tobytes())
     return h.hexdigest()[:12]
 
 
@@ -167,8 +230,7 @@ def save_safetensors(path, tensors, metadata):
 
 def write_lora(path, St, mix, ckpt, meta=None):
     tensors, info = lora_tensors(St, mix, ckpt)
-    md = {"ss_network_module": "loracasino.bias_diff", "ss_base_model_version": "sdxl_base_v1-0",
-          "modelspec.architecture": "stable-diffusion-xl-v1-base/lora"}
+    md = families.lora_meta(St["family"])
     md.update(meta or {})
     save_safetensors(path, tensors, md)
     return info
@@ -198,10 +260,9 @@ _pw = {}
 
 def describe(St, m):
     """One push in plain words."""
-    d0 = DEFAULT_S[size_of(m)]
-    r = abs(m["s"]) / d0
-    power = "gentle" if r < 0.35 else "medium" if r < 0.65 else "strong" if r < 1.0 else "very strong"
     c = int(m.get("center", m["ids"][0]))
+    r = abs(m["s"]) / base_s(St, c, size_of(m))
+    power = "gentle" if r < 0.35 else "medium" if r < 0.65 else "strong" if r < 1.0 else "very strong"
     what = {"G": f"group {m['label']} ({len(m['ids'])} neurons)", "S": f"piece {m['label']} ({len(m['ids'])} neurons)",
             "cluster": f"{len(m['ids'])} neurons near {m['label'].split()[0]}", "neuron": f"neuron {m['label']}"}.get(m["kind"], m["label"])
     cid = hashlib.sha1(np.sort(np.array(m["ids"], np.int32)).tobytes()).hexdigest()[:8]  # the card: which neurons, not how hard
@@ -210,13 +271,14 @@ def describe(St, m):
 
 
 def suit(St, m):
-    """The kind of card a push is, by where its neurons sit: layout, style or detail."""
+    """The kind of card a push is, by where its neurons sit (SDXL: layout, style or detail)."""
     w = where(St, int(St["layer"][int(m.get("center", m["ids"][0]))]))
     return "detail" if w == "fine detail" else w
 
 
-def knobs(body):
-    k = dict(KNOBS)
+def knobs(body, family=None):
+    """The sliders of a request; where one is not given, the family's own default, else the common one."""
+    k = dict(KNOBS) | (families.FAMILY.get(family, {}).get("knobs") or {})
     for n, v in (body.get("knobs") or {}).items():
         if n in k:
             try:
@@ -228,8 +290,8 @@ def knobs(body):
 
 def pick_weights(St, kn):
     """Cumulative pick chances over all neurons for the depth / spread sliders.
-    depth: 0 = first (layout) layers .. ~0.7 = the style layers .. 1 = the last (fine detail) layers;
-    spread: how far from that depth picks may land (1 = anywhere)."""
+    depth: 0 = the first layers .. 1 = the last (SDXL: layout .. ~0.7 style .. fine detail; Anima: prompt, layout,
+    subject, rendering); spread: how far from that depth picks may land (1 = anywhere)."""
     key = (id(St), round(kn["depth"], 2), round(kn["spread"], 2))
     if key not in _pw:
         L = len(St["names"])
@@ -246,7 +308,7 @@ def pick_weights(St, kn):
 def detail_weights(St):
     key = (id(St), "detail")
     if key not in _pw:
-        on = np.array([b in DETAIL_BLOCKS for b in St["blocks"]])
+        on = np.array(St["detail"], bool)
         w = on[St["layer"]].astype(np.float64)
         _pw[key] = np.cumsum(w / w.sum()) if w.sum() else np.cumsum(np.full(St["n"], 1.0 / St["n"]))
     return _pw[key]
@@ -269,7 +331,7 @@ def ingredient(St, rng, wild, kn):
 
 
 def strength_of(kn):
-    """The 'push strength' slider as a multiple of DEFAULT_S: 0 = x0.2, middle = x0.5, 1 = x1.2.
+    """The 'push strength' slider as a multiple of a card's starting strength: 0 = x0.2, middle = x0.5, 1 = x1.2.
     The middle is half of what a sturdy checkpoint takes, because checkpoints differ a lot in how hard they can be
     pushed before the picture breaks (seen: one Illustrious merge fine at x1, the Illustrious base broken at x0.5)."""
     return 0.5 * 6.0 ** (kn["strength"] - 0.5)

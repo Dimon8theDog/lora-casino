@@ -259,7 +259,11 @@ def comfy_folders():
         return _folders["d"]
     d = {}
     if FOLDERS:  # inside ComfyUI: it tells us directly
-        d = {k: [Path(p) for p in FOLDERS(k)] for k in ("checkpoints", "vae", "loras")}
+        for k in ("checkpoints", "diffusion_models", "text_encoders", "vae", "loras"):
+            try:
+                d[k] = [Path(p) for p in FOLDERS(k)]
+            except Exception:  # noqa: BLE001  (a ComfyUI too old to have that kind of folder)
+                d[k] = []
     elif find_comfy():
         try:
             for f in comfy("/experiment/models", timeout=5):
@@ -288,14 +292,18 @@ def lora_dir():
 
 
 def list_models():
-    """What ComfyUI can load and draw with: checkpoints, VAEs, samplers, schedulers; kept for 20 s."""
+    """What ComfyUI can load and draw with: checkpoints, diffusion models (a model file without its text encoder and
+    VAE), text encoders, VAEs, samplers, schedulers; kept for 20 s."""
     if _lists["d"] and time.time() - _lists["t"] < 20:
         return _lists["d"]
     if not find_comfy():
         raise ComfyDown(f"ComfyUI isn't running (tried {', '.join(comfy_try())}).")
     out = {}
-    for kind in ("checkpoints", "vae"):
-        names = comfy(f"/models/{kind}", timeout=8)
+    for kind in ("checkpoints", "diffusion_models", "text_encoders", "vae"):
+        try:
+            names = comfy(f"/models/{kind}", timeout=8)
+        except urllib.error.HTTPError:  # a ComfyUI that has no such folder
+            names = []
         out[kind] = [n for n in names if isinstance(n, str) and n.lower().endswith(".safetensors")]
     try:
         k = comfy("/object_info/KSampler", timeout=8)["KSampler"]["input"]["required"]
@@ -309,13 +317,20 @@ def list_models():
     return out
 
 
-def ckpt_path(name):
+def model_file(name):
+    """(path, kind) of a model by the name ComfyUI lists it under. kind "checkpoints" = a whole checkpoint (model,
+    text encoder and VAE in one file); "diffusion_models" = the model alone, drawn with a text encoder and a VAE."""
     if not name:
-        raise ValueError("Pick a checkpoint first (Tune, under Model)")
-    for r in model_roots("checkpoints"):
-        p = (r / name).resolve()
-        if p.suffix == ".safetensors" and p.exists() and r.resolve() in p.parents:
-            return p
+        raise ValueError("Pick a model first (Table, under Model)")
+    for kind in ("checkpoints", "diffusion_models"):
+        for r in model_roots(kind):
+            p = (r / name).resolve()
+            if p.suffix == ".safetensors" and p.exists() and r.resolve() in p.parents:
+                return p, kind
     if not comfy_folders():
         raise ComfyDown(f"ComfyUI isn't running (tried {', '.join(comfy_try())}). Start it and draw again.")
-    raise ValueError(f"Checkpoint {name} wasn't found in ComfyUI's checkpoint folders")
+    raise ValueError(f"{name} wasn't found in ComfyUI's checkpoint or diffusion model folders")
+
+
+def ckpt_path(name):
+    return model_file(name)[0]

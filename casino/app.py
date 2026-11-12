@@ -20,11 +20,11 @@ from pathlib import Path
 
 import numpy as np
 
-from . import host, weights
+from . import families, host, weights
 from .engine import (clean_mix, deck, describe, knobs, mix_key, move_weights, mutate, png_with_text, polish, recipe_text,
                      write_lora, KNOBS)
-from .host import (CID, PREVIEW, ComfyDown, _live, ckpt_path, comfy, comfy_try, find_comfy, list_models, live, live_start,
-                   lora_dir, set_settings, settings)
+from .host import (CID, PREVIEW, ComfyDown, _live, comfy, comfy_try, find_comfy, list_models, live, live_start,
+                   lora_dir, model_file, set_settings, settings)
 
 PAGE = RENDERS = SAVED = None
 
@@ -50,7 +50,7 @@ KEEP_TEMP = 40
 QUALITY = {"breed": {"width": 512, "height": 688, "steps": 12}, "full": {"width": 768, "height": 1024, "steps": 20}}
 
 
-DRAW = {"negative": "low quality, worst quality, blurry", "cfg": 5.0, "sampler": "dpmpp_2m", "scheduler": "karras", "steps": 12}
+DRAW = families.FAMILY["sdxl"]["draw"]   # what the page starts with; a model of another family brings its own (see /api/model)
 
 
 # example prompts in plain words, so they read on tag-trained and caption-trained checkpoints alike; yours go beside them
@@ -73,23 +73,61 @@ class Reading(RuntimeError):
 NAME_OK = re.compile(r"^[\w.+\- ]{1,60}$")
 
 
+def liked(names, hint):
+    """The file a family's makers ship (the first whose name has `hint` in it), else the first there is, else ''."""
+    return next((n for n in names if hint and hint in n.lower()), names[0] if names else "")
+
+
+def about(name):
+    """What kind of model a name is and what it is drawn with:
+    {"path", "family", "alone", "te", "vae", "zones"}. alone = the file holds the model only (ComfyUI's
+    diffusion_models folder) and needs a text encoder and a VAE beside it; te / vae are the ones picked by default."""
+    path, kind = model_file(name)
+    m = weights.model(path)  # ValueError if it is not a model we know
+    fam, alone = m["family"], kind == "diffusion_models"
+    F = families.FAMILY[fam]
+    if alone and "clip_type" not in F:
+        raise ValueError(f"{name} is {F['title']} without its text encoders and VAE. LoRA Casino draws {F['title']} "
+                         "from a whole checkpoint: use one from ComfyUI's checkpoints folder.")
+    te = vae = ""
+    if alone:
+        lists = list_models()
+        te, vae = liked(lists["text_encoders"], F["likes"]["te"]), liked(lists["vae"], F["likes"]["vae"])
+    zones = families.per_layer(fam, m["prefix"], [n for n, _, _ in m["layers"]])["zone"]
+    return {"path": path, "family": fam, "alone": alone, "te": te, "vae": vae, "zones": zones}
+
+
 def setup(body):
-    """Which checkpoint, VAE and drawing settings a request uses, checked. 'tag' names them in picture file names."""
+    """Which model, text encoder, VAE and drawing settings a request uses, checked. 'tag' names them in picture
+    file names."""
     name = str(body.get("ckpt") or "")
-    path = ckpt_path(name)
-    weights.layers(path)  # ValueError if it is not SDXL
+    A = about(name)
+    path, fam = A["path"], A["family"]
+    D = families.FAMILY[fam]["draw"]
     vae = body.get("vae")
     vae = "" if vae in (None, "", "checkpoint") else str(vae)
-    neg = str(body.get("negative", DRAW["negative"]))[:2000]
+    te = ""
+    if A["alone"]:  # the model alone: it is drawn with a text encoder and a VAE from ComfyUI's folders
+        lists = list_models()
+        te = str(body.get("te") or "")
+        te = te if te in lists["text_encoders"] else A["te"]
+        vae = vae if vae in lists["vae"] else A["vae"]
+        if not te or not vae:
+            title = families.FAMILY[fam]["title"]
+            raise ValueError(f"{title} needs a text encoder and a VAE, and ComfyUI has no "
+                             f"{'text encoder' if not te else 'VAE'} file (.safetensors, in its "
+                             f"{'text_encoders' if not te else 'vae'} folder).")
+    neg = str(body.get("negative", D["negative"]))[:2000]
     try:
-        cfg = min(30.0, max(1.0, float(body.get("cfg", DRAW["cfg"]))))
+        cfg = min(30.0, max(1.0, float(body.get("cfg", D["cfg"]))))
     except (TypeError, ValueError):
-        cfg = DRAW["cfg"]
-    sampler, scheduler = str(body.get("sampler") or DRAW["sampler"]), str(body.get("scheduler") or DRAW["scheduler"])
+        cfg = D["cfg"]
+    sampler, scheduler = str(body.get("sampler") or D["sampler"]), str(body.get("scheduler") or D["scheduler"])
     if not NAME_OK.match(sampler) or not NAME_OK.match(scheduler):
         raise ValueError("Unknown sampler or scheduler")
-    tag = hashlib.sha1(f"{name}|{os.path.getsize(path)}|{vae}|{neg}|{cfg:g}|{sampler}|{scheduler}".encode()).hexdigest()[:8]
-    return {"ckpt": name, "path": path, "vae": vae, "negative": neg, "cfg": cfg, "sampler": sampler, "scheduler": scheduler, "tag": tag}
+    tag = hashlib.sha1(f"{name}|{os.path.getsize(path)}|{vae}|{neg}|{cfg:g}|{sampler}|{scheduler}{'|' + te if te else ''}".encode()).hexdigest()[:8]
+    return {"ckpt": name, "path": path, "family": fam, "alone": A["alone"], "te": te, "vae": vae, "negative": neg, "cfg": cfg,
+            "sampler": sampler, "scheduler": scheduler, "tag": tag}
 
 
 def numbers(M):
@@ -105,7 +143,7 @@ def numbers(M):
 
 def size_from(body, base):
     """The size the page asked for ({"size": {"w", "h", "steps"}}), checked; else the default `base`.
-    Sides are rounded to multiples of 16 (SDXL works in 8-pixel latents; 16 keeps both halves even), 256-2048,
+    Sides are rounded to multiples of 16 (the models work in 8-pixel latents; 16 keeps both halves even), 256-2048,
     at most 2.4 megapixels."""
     d = body.get("size")
     b = QUALITY[base]
@@ -118,19 +156,24 @@ def size_from(body, base):
         raise ValueError("picture size must be numbers") from None
     w, h, steps = min(2048, max(256, w)), min(2048, max(256, h)), min(80, max(1, steps))
     if w * h > 2_400_000:
-        raise ValueError(f"{w}×{h} is too big (over 2.4 megapixels); SDXL starts repeating things well before that")
+        raise ValueError(f"{w}×{h} is too big (over 2.4 megapixels); these models start repeating things well before that")
     return {"width": w, "height": h, "steps": steps, "tag": f"{w}x{h}x{steps}"}
 
 
 def workflow(prompt, seed, s, M, lora_name=None):
-    model = ["1", 0]
-    g = {"1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": M["ckpt"]}}}
+    model, clip = ["1", 0], ["1", 1]
+    if M.get("alone"):  # the model alone, with its text encoder beside it (and its VAE: node 7 below)
+        g = {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": M["ckpt"], "weight_dtype": "default"}},
+             "10": {"class_type": "CLIPLoader", "inputs": {"clip_name": M["te"], "type": families.FAMILY[M["family"]]["clip_type"]}}}
+        clip = ["10", 0]
+    else:
+        g = {"1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": M["ckpt"]}}}
     if lora_name:
         g["2"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": lora_name, "strength_model": 1.0}}
         model = ["2", 0]
     g.update({
-        "3": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1], "text": prompt}},
-        "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1], "text": M["negative"]}},
+        "3": {"class_type": "CLIPTextEncode", "inputs": {"clip": clip, "text": prompt}},
+        "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": clip, "text": M["negative"]}},
         "5": {"class_type": "EmptyLatentImage", "inputs": {"width": s["width"], "height": s["height"], "batch_size": 1}},
         "6": {"class_type": "KSampler", "inputs": {"model": model, "positive": ["3", 0], "negative": ["4", 0], "latent_image": ["5", 0],
                                                    "seed": int(seed), "steps": s["steps"], "cfg": M["cfg"], "sampler_name": M["sampler"],
@@ -315,7 +358,7 @@ def breed(body):
     parent = clean_mix(body.get("parent"), St["n"])
     seed = int(body.get("seed", 6100)) % (2 ** 48)
     wild = min(1.0, max(0.0, float(body.get("wild", 0.5))))
-    kn = knobs(body)
+    kn = knobs(body, M["family"])
     n = 4 if int(body.get("n", 8)) == 4 else 8
     q = size_from(body, "breed")
     rng = np.random.default_rng()
@@ -377,13 +420,14 @@ def save(St, mix, name, prompt, seed, rkey, M, qs):
     rec = {"name": name, "made_by": "LoRA Casino", "made": time.strftime("%Y-%m-%d %H:%M:%S"),
            "mix": [{k: m[k] for k in ("label", "kind", "s")} | {"neurons": len(m["ids"])} for m in mix],
            "recipe": recipe_text(St, mix),
-           "checkpoint": M["ckpt"], "vae": M["vae"] or "(the checkpoint's own)", "prompt": prompt, "negative": M["negative"], "seed": seed,
+           "checkpoint": M["ckpt"], "family": M["family"], "vae": M["vae"] or "(the checkpoint's own)",
+           "text_encoder": M["te"] or "(the checkpoint's own)", "prompt": prompt, "negative": M["negative"], "seed": seed,
            "cfg": M["cfg"], "sampler": M["sampler"], "scheduler": M["scheduler"],
            "width": qs["width"], "height": qs["height"], "steps": qs["steps"],
            "lora": {"file": lf.name, "comfyui_lora_name": lora_name, "strength": 1.0,
                     "how": "LoraLoaderModelOnly (or LoraLoader). Strength 1 = the picture; it is linear: 0.5 half, 2 double, "
                            "-1 the opposite. Several of these LoRAs together add up.",
-                    "made_for": f"{M['ckpt']} (the bias change uses this checkpoint's weights: exact on it, close on its relatives)"}}
+                    "made_for": f"{M['ckpt']} (the change is made from this checkpoint's weights: exact on it, close on its relatives)"}}
     rec["layers"] = write_lora(lf, St, mix, M["path"], {"modelspec.title": name, "loracasino_recipe": json.dumps(rec)})
     pic = RENDERS / f"{rkey}.png" if rkey and re.match(r"^push_\w+$", rkey) else None
     if pic and pic.exists():
@@ -396,6 +440,32 @@ def save(St, mix, name, prompt, seed, rkey, M, qs):
         if (SAVED / f"{name}{ext}").exists():
             shutil.copyfile(SAVED / f"{name}{ext}", dst / f"{name}{ext}")
     return {"name": name, "file": str(lf), "comfyui": str(dst / lf.name), "lora_name": lora_name}
+
+
+_known = {}
+
+
+def models():
+    """ComfyUI's lists, with the diffusion models narrowed to the ones LoRA Casino can play on (that folder also
+    holds video models, upscalers' backbones and whatever else; a look at each file's header tells)."""
+    out = dict(list_models())
+    keep = []
+    for n in out["diffusion_models"]:
+        try:
+            p, kind = model_file(n)
+            s = os.stat(p)
+            key = (str(p), s.st_size, s.st_mtime_ns)
+            if key not in _known:
+                try:
+                    _known[key] = kind == "diffusion_models" and "clip_type" in families.FAMILY[weights.model(p)["family"]]
+                except (ValueError, KeyError):
+                    _known[key] = False
+            if _known[key]:
+                keep.append(n)
+        except (OSError, ValueError):
+            continue
+    out["diffusion_models"] = keep
+    return out
 
 
 def handle(path, query):
@@ -435,13 +505,18 @@ def handle(path, query):
                      "prompts": PROMPTS, "knobs": KNOBS, "draw": DRAW}, None
     if what == "models":
         try:
-            return 200, list_models(), None
+            return 200, models(), None
         except ComfyDown as e:
             return 503, {"error": str(e)}, None
-    if what == "model":  # is this checkpoint usable, and are its numbers ready (reading starts here)
+    if what == "model":  # is this model usable, what is it drawn with, and are its numbers ready (reading starts here)
         try:
-            p = ckpt_path(q.get("ckpt", ""))
-            return 200, {"ok": True} | weights.state(p), None
+            A = about(q.get("ckpt", ""))
+            F = families.FAMILY[A["family"]]
+            out = {"ok": True, "family": A["family"], "title": F["title"], "draw": F["draw"], "seconds": F["seconds"],
+                   "knobs": KNOBS | (F.get("knobs") or {}),
+                   "alone": A["alone"], "te": A["te"], "vae": A["vae"], "zones": A["zones"]}
+            # peek: only what kind of model it is. Without it the reading of its weights starts, and is reported.
+            return 200, out if q.get("peek") else out | weights.state(A["path"]), None
         except ComfyDown as e:
             return 503, {"error": str(e)}, None
         except (ValueError, OSError, KeyError) as e:

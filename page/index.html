@@ -427,10 +427,11 @@ kbd { padding: 3px 5px; border-radius: 4px; background: var(--kbd); font: 500 10
       <div class="sec"><button type="button" class="linkbtn" id="kReset" style="align-self:flex-start">Reset all five</button></div>
       <div class="sec">
         <span class="eyebrow" style="color:var(--text-3)">Model</span>
-        <div class="pick"><label for="ckpt" class="sr">Checkpoint</label><select id="ckpt"></select></div>
+        <div class="pick"><label for="ckpt" class="sr">Model</label><select id="ckpt"></select></div>
         <div class="reading" id="readBar" hidden><i></i></div>
+        <div class="pick" id="tePick" hidden><label for="te" class="sr">Text encoder</label><select id="te"></select></div>
         <div class="pick"><label for="vae" class="sr">VAE</label><select id="vae"></select></div>
-        <p class="lead" style="margin:4px 0 0">Any SDXL checkpoint: SDXL itself, Pony, Illustrious, NoobAI and their merges. The first time you use one, its weights are read to size the pushes for it. That takes about a minute and is kept.</p>
+        <p class="lead" style="margin:4px 0 0">SDXL checkpoints (SDXL itself, Pony, Illustrious, NoobAI and their merges) and Anima. The first time you use a model, its weights are read to size the pushes for it. That takes about a minute and is kept.</p>
       </div>
       <div class="sec">
         <span class="eyebrow" style="color:var(--text-3)">Drawing</span>
@@ -544,9 +545,16 @@ const KNOB_UI = [
   ['spread', 'Spread', 'one spot', 'anywhere'],
   ['count', 'Cards in a new hand', 'one', 'many'],
 ];
-// the checkpoint, VAE and drawing settings every request carries; a favourite keeps the ones it was drawn with
-const SETUP_KEYS = ['ckpt', 'vae', 'negative', 'cfg', 'sampler', 'scheduler'];
-const reqModel = () => ({ ckpt: S.ckpt || undefined, vae: S.vae ?? undefined, negative: S.negative, cfg: S.cfg, sampler: S.sampler, scheduler: S.scheduler });
+// the model, VAE, text encoder and drawing settings every request carries; a favourite keeps the ones it was drawn with
+const SETUP_KEYS = ['ckpt', 'vae', 'te', 'negative', 'cfg', 'sampler', 'scheduler'];
+const reqModel = () => ({ ckpt: S.ckpt || undefined, vae: S.vae ?? undefined, te: S.alone ? (S.te || undefined) : undefined, negative: S.negative, cfg: S.cfg, sampler: S.sampler, scheduler: S.scheduler });
+// Models come in families (SDXL, Anima). Each is drawn its own way, so the drawing settings are kept per family:
+// S.fam is the family of the model in use, S.byFam holds what the other families were last set to.
+if (typeof S.fam !== 'string') S.fam = 'sdxl';
+S.byFam = S.byFam || {};
+const FAM_KEYS = ['negative', 'steps', 'cfg', 'sampler', 'scheduler', 'vae', 'te', 'knobs'];
+const MODELS = {};   // name -> what /api/model said about it
+let LISTS = null;    // what ComfyUI can load (see fillModels)
 const setupOf = c => c && c.ckpt ? Object.fromEntries(SETUP_KEYS.filter(k => c[k] !== undefined).map(k => [k, c[k]])) : reqModel();
 const fullSteps = n => Math.round((n || S.steps) * 5 / 3);
 // this tab's id: kept across reloads (sessionStorage is per tab), so reloading cancels this tab's unfinished step
@@ -558,10 +566,10 @@ let favs = store.get('favs', []);
 const save = () => store.set('state', S);
 
 // ---------------------------------------------------------------- picture size
-// step pictures: Fast = 512x688 at 3:4 (about 0.35 MP), Balanced 0.6 MP, Sharp 1 MP (SDXL's own size), or your own.
+// step pictures: Fast = 512x688 at 3:4 (about 0.35 MP), Balanced 0.6 MP, Sharp 1 MP (the size the models are made for), or your own.
 // full size (close-up, LoRA preview): 0.8 / 1 / 1.5 MP in the same shape. Sides round to multiples of 16.
 const SHAPES = { '3:4': [3, 4], '2:3': [2, 3], '9:16': [9, 16], '1:1': [1, 1], '4:3': [4, 3], '3:2': [3, 2], '16:9': [16, 9] };
-const STEP_Q = { fast: ['Fast', 0.3523], balanced: ['Balanced', 0.6], sharp: ['Sharp', 1.0486], custom: ['Own', 0] };  // sharp = 1024² (SDXL's own)
+const STEP_Q = { fast: ['Fast', 0.3523], balanced: ['Balanced', 0.6], sharp: ['Sharp', 1.0486], custom: ['Own', 0] };  // sharp = 1024²
 const FINAL_Q = { '0.8': 0.786, '1': 1.0486, '1.5': 1.5 };
 if (!SHAPES[S.aspect]) S.aspect = '3:4';
 if (!STEP_Q[S.q]) S.q = 'fast';
@@ -573,7 +581,7 @@ function dims(ratio, mp) { const h = Math.sqrt(mp * 1e6 / ratio); return { w: cl
 function shapeRatio() { const [a, b] = SHAPES[S.aspect]; return a / b; }
 function stepSize() { return S.q === 'custom' ? { w: clampSide(S.custom.w), h: clampSide(S.custom.h) } : dims(shapeRatio(), STEP_Q[S.q][1]); }
 function finalFor(sz) { const s = sz || stepSize(); return dims(s.w / s.h, FINAL_Q[S.final]); }
-const secsFor = (s, steps) => Math.max(1, Math.round(4 * (s.w * s.h / 352256) * (steps / 12)));  // measured: ~4 s for 512x688, 12 steps, 3060
+const secsFor = (s, steps) => Math.max(1, Math.round(4 * (S.secs || 1) * (s.w * s.h / 352256) * (steps / 12)));  // measured: ~4 s for SDXL at 512x688, 12 steps, 3060; S.secs = this family next to SDXL
 const glyph = (s, max) => { const k = max / Math.max(s.w, s.h); return `<i aria-hidden="true" style="width:${Math.round(s.w * k)}px;height:${Math.round(s.h * k)}px"></i>`; };
 function fitGrid() {
   const st = $('.stage'), g = $('#grid'); if (!st || !g) return;
@@ -602,7 +610,7 @@ function drawSize() {
   $('#cw').value = s.w; $('#ch').value = s.h;
   const per = secsFor(s, S.steps || 12);
   $('#sizeNote').textContent = `Steps draw at ${s.w}×${s.h}: roughly ${per} s a picture, ${per * n} s for ${n}. Full size ${f.w}×${f.h}: roughly ${secsFor(f, fullSteps(S.steps || 12))} s. (Guessed for a mid-range GPU.)`
-    + (s.w * s.h > 1.3e6 ? ' Past about 1.3 MP SDXL tends to repeat things (two heads, extra trees).' : '');
+    + (s.w * s.h > 1.3e6 ? ' Past about 1.3 MP the model tends to repeat things (two heads, extra trees).' : '');
   $('#shapes').querySelectorAll('[data-shape]').forEach(b => b.onclick = () => {
     if (S.q === 'custom') { const c = stepSize(); S.custom = dims(SHAPES[b.dataset.shape][0] / SHAPES[b.dataset.shape][1], c.w * c.h / 1e6); }
     S.aspect = b.dataset.shape; if (S.q === 'custom') S.q = 'custom'; sizeChanged();
@@ -612,7 +620,7 @@ function drawSize() {
 }
 ['cw', 'ch'].forEach(id => $('#' + id).onchange = () => {
   S.custom = { w: clampSide(+$('#cw').value || 512), h: clampSide(+$('#ch').value || 688) };
-  if (S.custom.w * S.custom.h > 2.4e6) { status('Over 2.4 MP is too big for SDXL', true); S.custom = dims(S.custom.w / S.custom.h, 2.4); }
+  if (S.custom.w * S.custom.h > 2.4e6) { status('Over 2.4 MP is too big', true); S.custom = dims(S.custom.w / S.custom.h, 2.4); }
   sizeChanged();
 });
 if (window.ResizeObserver) new ResizeObserver(() => fitGrid()).observe(document.querySelector('.stage') || document.body);
@@ -935,7 +943,7 @@ async function sweep(i) {
 // up or down, and how many neurons. Its emblem is drawn from which neurons it is, so the same card looks the same in
 // every hand. Under the table is your hand, with Hold (deals leave that card alone) and Discard on each card;
 // pointing at a dealt card shows its hand there instead, with what differs from yours marked.
-const SUIT = { layout: 'Layout', style: 'Style', 'fine detail': 'Detail' };
+const SUIT = { layout: 'Layout', style: 'Style', 'fine detail': 'Detail', prompt: 'Prompt', subject: 'Subject', rendering: 'Rendering' };
 function emblem(x) {
   let h = 2166136261;
   for (const ch of String(x.cid || '')) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
@@ -1295,11 +1303,17 @@ $('#redo').onclick = () => busy ? stopStep() : newRound();
 $('#reseed').onclick = () => { S.seed = Math.floor(Math.random() * 1e9); save(); newRound(); };
 $('#back').onclick = () => { if (S.path.length > 1) { S.path.pop(); save(); newRound(); } };
 $('#restart').onclick = () => { S.path = [{ mix: [], key: null }]; S.polish = false; save(); showPolish(); newRound(); };
-function knobLabel(k, v) { return k === 'depth' ? (v < 0.4 ? 'layout' : v < 0.88 ? 'style' : 'fine detail') : ''; }
+// "Where in the network" names the suit the slider points at: S.zones is the suit of each layer of the model in use
+function knobLabel(k, v) {
+  if (k !== 'depth') return '';
+  const z = S.zones;
+  return z && z.length ? z[Math.round(v * (z.length - 1))] : (v < 0.4 ? 'layout' : v < 0.88 ? 'style' : 'fine detail');
+}
 function drawKnobs() {
-  const d = (META && META.knobs) || {};
+  const d = S.knob0 || (META && META.knobs) || {};
   $('#knobs').innerHTML = KNOB_UI.map(([k, t, lo, hi]) => {
     const v = S.knobs[k] ?? d[k] ?? 0.5;
+    if (k === 'depth' && S.zones && S.zones.length) { lo = S.zones[0]; hi = S.zones[S.zones.length - 1]; }
     return `<div class="knob"><div class="t"><label for="k-${k}">${t}</label><span>${knobLabel(k, v)}</span></div>
       <input id="k-${k}" type="range" min="0" max="1" step="0.05" value="${v}" data-k="${k}"><div class="ends"><span>${lo}</span><span>${hi}</span></div></div>`;
   }).join('');
@@ -1310,51 +1324,91 @@ function drawKnobs() {
 }
 $('#kReset').onclick = () => { S.knobs = {}; save(); drawKnobs(); setDirty(true); };
 const opt = (v, t) => `<option value="${esc(v)}">${esc(t ?? v)}</option>`;
+const short = n => String(n).replace(/\.safetensors$/, '');
 async function fillModels() {
-  const m = await api('api/models');
-  const ck = m.checkpoints;
-  $('#ckpt').innerHTML = ck.length ? ck.map(n => opt(n, n.replace(/\.safetensors$/, ''))).join('') : opt('', 'No .safetensors checkpoints in ComfyUI');
-  $('#vae').innerHTML = opt('checkpoint', "VAE: the checkpoint's own") + m.vae.map(n => opt(n, 'VAE: ' + n.replace(/\.safetensors$/, ''))).join('');
-  if (!S.ckpt || !ck.includes(S.ckpt)) S.ckpt = ck[0] || '';
+  const m = LISTS = await api('api/models');
+  const ck = m.checkpoints, dm = m.diffusion_models || [], all = [...ck, ...dm];
+  const opts = list => list.map(n => opt(n, short(n))).join('');
+  $('#ckpt').innerHTML = !all.length ? opt('', 'No .safetensors models in ComfyUI')
+    : dm.length ? (ck.length ? `<optgroup label="Checkpoints">${opts(ck)}</optgroup>` : '') + `<optgroup label="Diffusion models">${opts(dm)}</optgroup>` : opts(ck);
+  $('#te').innerHTML = (m.text_encoders || []).map(n => opt(n, 'Text encoder: ' + short(n))).join('');
+  if (!S.ckpt || !all.includes(S.ckpt)) S.ckpt = all[0] || '';
   if (S.vae == null || (S.vae !== 'checkpoint' && !m.vae.includes(S.vae))) S.vae = 'checkpoint';
-  if (!m.samplers.includes(S.sampler)) S.sampler = m.samplers.includes(META.draw.sampler) ? META.draw.sampler : m.samplers[0];
-  if (!m.schedulers.includes(S.scheduler)) S.scheduler = m.schedulers.includes(META.draw.scheduler) ? META.draw.scheduler : m.schedulers[0];
   $('#sampler').innerHTML = m.samplers.map(n => opt(n)).join(''); $('#scheduler').innerHTML = m.schedulers.map(n => opt(n)).join('');
-  $('#ckpt').value = S.ckpt; $('#vae').value = S.vae; $('#sampler').value = S.sampler; $('#scheduler').value = S.scheduler; save();
+  $('#ckpt').value = S.ckpt;
+  // what kind of model the one in use is (asked without reading its weights: that waits for the first deal)
+  if (S.ckpt) { try { const r = await api('api/model?peek=1&ckpt=' + encodeURIComponent(S.ckpt)); if (r.ok) MODELS[S.ckpt] = r; } catch { /* ComfyUI went away: connect() tries again */ } }
+  adopt(MODELS[S.ckpt]);
+}
+// Make the page fit the model in use: its family's drawing settings (kept apart from the other families'), whether it
+// needs a text encoder and a VAE beside it, and the suits its layers have.
+function adopt(r) {
+  const m = LISTS || { vae: [], text_encoders: [], samplers: [], schedulers: [] };
+  if (r) {
+    const fam = r.family || 'sdxl';
+    if (fam !== S.fam) {
+      S.byFam[S.fam] = Object.fromEntries(FAM_KEYS.map(k => [k, S[k]]));
+      const d = S.byFam[fam] || { ...r.draw, vae: r.alone ? r.vae : 'checkpoint', te: r.te };
+      FAM_KEYS.forEach(k => { S[k] = d[k]; });
+      S.knobs = S.knobs || {};   // the five sliders: each family has its own starting points and keeps your changes
+      S.fam = fam;
+    }
+    S.alone = !!r.alone; S.zones = r.zones || null; S.secs = r.seconds || 1; S.knob0 = r.knobs || null;
+    if (S.alone) {  // the model alone: it has no VAE or text encoder of its own
+      if (!m.text_encoders.includes(S.te)) S.te = r.te;
+      if (S.vae === 'checkpoint' || !m.vae.includes(S.vae)) S.vae = r.vae;
+    }
+  }
+  const d = (r && r.draw) || META.draw;
+  if (!m.samplers.includes(S.sampler)) S.sampler = m.samplers.includes(d.sampler) ? d.sampler : m.samplers[0];
+  if (!m.schedulers.includes(S.scheduler)) S.scheduler = m.schedulers.includes(d.scheduler) ? d.scheduler : m.schedulers[0];
+  $('#vae').innerHTML = (S.alone ? '' : opt('checkpoint', "VAE: the checkpoint's own")) + m.vae.map(n => opt(n, 'VAE: ' + short(n))).join('');
+  $('#tePick').hidden = !S.alone;
+  $('#vae').value = S.vae; $('#te').value = S.te || ''; $('#sampler').value = S.sampler; $('#scheduler').value = S.scheduler;
+  save(); drawDraw(d); drawKnobs(); drawSize();
 }
 // A checkpoint's weights are read once before its first picture. This waits for that, showing how far it is.
 // -> true when the checkpoint can be drawn with; false (with the reason shown) when it can't.
 async function modelReady(name, say) {
   name = name || S.ckpt;
-  const tell = say || ((t, err) => status(t, err, !err)), bar = $('#readBar'), short = String(name).replace(/\.safetensors$/, '');
-  if (!name) { tell('ComfyUI has no .safetensors checkpoint to draw with', true); return false; }
+  const tell = say || ((t, err) => status(t, err, !err)), bar = $('#readBar');
+  if (!name) { tell('ComfyUI has no .safetensors model to draw with', true); return false; }
   try {
     for (;;) {
       const r = await api('api/model?ckpt=' + encodeURIComponent(name));
-      if (!r.ok || r.error) { bar.hidden = true; tell(r.error || 'That checkpoint could not be read', true); return false; }
-      if (r.ready) { bar.hidden = true; return true; }
+      if (!r.ok || r.error) { bar.hidden = true; tell(r.error || 'That model could not be read', true); return false; }
+      MODELS[name] = r;
+      if (r.ready) { bar.hidden = true; if (name === S.ckpt && (r.family || 'sdxl') !== S.fam) adopt(r); return true; }
       bar.hidden = false; bar.firstElementChild.style.width = Math.round(r.p * 100) + '%';
-      tell(`Reading ${short} for the first time · ${Math.round(r.p * 100)}%`);
+      tell(`Reading ${short(name)} for the first time · ${Math.round(r.p * 100)}%`);
       await new Promise(res => setTimeout(res, 500));
     }
   } catch (e) { bar.hidden = true; tell(e.message, true); return false; }
 }
 $('#ckpt').onchange = async () => {
-  const prev = S.ckpt, name = $('#ckpt').value;
+  const prev = S.ckpt, name = $('#ckpt').value, was = S.fam;
   if (!(await modelReady(name))) { $('#ckpt').value = prev; return; }
-  S.ckpt = name; save(); setDirty(true);
+  S.ckpt = name; adopt(MODELS[name]); setDirty(true);
   if (!started) status('');
+  if (S.fam !== was && (S.path.length > 1 || cur().mix.length)) {
+    // a card is neurons of one kind of model, so a hand can't follow to another kind: the table starts over
+    S.path = [{ mix: [], key: null }]; S.polish = false; save(); showPolish(); drawHand(); drawTrail(); where();
+    status('Another kind of model: your hand was folded');
+  } else if (S.path.length === 1 && !cur().mix.length && cur().key) {
+    cur().key = null; save();   // the plain picture on the table was the other model's
+  }
 };
 $('#vae').onchange = () => { S.vae = $('#vae').value; save(); setDirty(true); };
+$('#te').onchange = () => { S.te = $('#te').value; save(); setDirty(true); };
 $('#sampler').onchange = () => { S.sampler = $('#sampler').value; save(); setDirty(true); };
 $('#scheduler').onchange = () => { S.scheduler = $('#scheduler').value; save(); setDirty(true); };
 $('#neg').oninput = () => { S.negative = $('#neg').value; save(); setDirty(true); };
 $('#steps').onchange = () => { S.steps = Math.min(60, Math.max(1, Math.round(+$('#steps').value) || META.draw.steps)); $('#steps').value = S.steps; save(); drawSize(); setDirty(true); };
 $('#cfg').onchange = () => { S.cfg = Math.min(30, Math.max(1, +$('#cfg').value || META.draw.cfg)); $('#cfg').value = S.cfg; save(); setDirty(true); };
-function drawDraw() {
-  if (typeof S.negative !== 'string') S.negative = META.draw.negative;
-  if (!(S.steps >= 1)) S.steps = META.draw.steps;
-  if (!(S.cfg >= 1)) S.cfg = META.draw.cfg;
+function drawDraw(d = META.draw) {
+  if (typeof S.negative !== 'string') S.negative = d.negative;
+  if (!(S.steps >= 1)) S.steps = d.steps;
+  if (!(S.cfg >= 1)) S.cfg = d.cfg;
   $('#neg').value = S.negative; $('#steps').value = S.steps; $('#cfg').value = S.cfg;
 }
 // ComfyUI: found by itself on its usual ports; the address field is for one that lives elsewhere on this PC

@@ -1,15 +1,18 @@
 """Everything LoRA Casino knows about a checkpoint, worked out from the checkpoint's own weights (numpy only).
 
-A "neuron" is one hidden unit of a transformer block's feed-forward layer (the input of ff.net.2). SDXL has 70 such
-layers. For the checkpoint in use this module reads, once, and keeps in data/cache:
+A "neuron" is one hidden unit of a transformer block's feed-forward layer (the input of its output weight). SDXL has
+70 such layers, Anima 34 (families.py says which file is which and where the layers are). For the checkpoint in use
+this module reads, once, and keeps in data/cache:
 
-  absB   how big each neuron's activation typically is. A push moves a neuron by a multiple of this. Estimated from
-         the weights: the layer's input comes out of a LayerNorm (norm3), so each pre-activation is roughly normal
-         with a mean and spread given by norm3 and ff.net.0.proj; the unit is a * gelu(gate) of two of those.
-         Checked against sizes measured on real pictures for one checkpoint: the per-layer level is within about
-         +-40 %, single neurons inside a layer are noisier (about x1.4 either way).
+  absB   how big each neuron's activation typically is. Where a push is a bias change it moves a neuron by a multiple
+         of this. Estimated from the weights: the layer's input comes out of a norm, so each pre-activation is roughly
+         normal with a mean and spread given by that norm and the layer's input weights.
+         SDXL: the unit is a * gelu(gate) of two of those. Checked against sizes measured on real pictures for one
+         checkpoint: the per-layer level is within about +-40 %, single neurons are noisier (about x1.4 either way).
+         Anima's text adapter: the unit is gelu of one. Not checked against measurements.
+         Anima's blocks: 1, because a push there is a factor, not an amount.
   knn    each neuron's 12 nearest neighbours: the neurons of the same layer that write in the most similar direction
-         (cosine of their ff.net.2 columns).
+         (cosine of the columns of the layer's output weight).
   g1/g2  groups of about 1000 and pieces of about 100 neurons that write in similar directions (k-means on the same
          columns, per layer).
 
@@ -18,17 +21,14 @@ Nothing here is specific to one checkpoint: the layer list, sizes and all number
 import hashlib
 import json
 import os
-import re
 import struct
 import threading
 from pathlib import Path
 
 import numpy as np
 
-PREFIX = "model.diffusion_model."
-FF_OUT = re.compile(r"^model\.diffusion_model\.((input_blocks|middle_block|output_blocks)\.(?:(\d+)\.)?(\d+)"
-                    r"\.transformer_blocks\.(\d+))\.ff\.net\.2\.weight$")
-SDXL_LAYERS = 70
+from . import families
+
 KNN = 12
 VERSION = 1
 CACHE = None  # set by app.configure(): <data>/cache
@@ -76,22 +76,15 @@ def tensor(path, name):
     return arr.reshape(t["shape"]).astype(np.float32)
 
 
-def layers(path):
-    """[(name, neurons, width)] of the feed-forward layers, in network order; ValueError if this is not SDXL."""
+def model(path):
+    """{"family", "prefix", "layers": [(name, neurons, width)]} of a model file; ValueError if it is not one we know."""
     _, h = header(path)
-    found = []
-    for k, t in h.items():
-        m = FF_OUT.match(k)
-        if m:
-            part = {"input_blocks": 0, "middle_block": 1, "output_blocks": 2}[m.group(2)]
-            found.append(((part, int(m.group(3) or 0), int(m.group(4)), int(m.group(5))), m.group(1), t["shape"][1], t["shape"][0]))
-    found.sort()
-    name = Path(path).name
-    if not found:
-        raise ValueError(f"{name} has no SDXL UNet inside (a checkpoint for another kind of model, or a LoRA / VAE file)")
-    if len(found) != SDXL_LAYERS:
-        raise ValueError(f"{name} is not an SDXL checkpoint: it has {len(found)} transformer layers, SDXL has {SDXL_LAYERS}")
-    return [(n, int(inner), int(dim)) for _, n, inner, dim in found]
+    return families.read({k: v for k, v in h.items() if k != "__metadata__"}, Path(path).name)
+
+
+def layers(path):
+    """[(name, neurons, width)] of the feed-forward layers, in network order."""
+    return model(path)["layers"]
 
 
 # ---------------------------------------------------------------- the numbers
@@ -108,10 +101,100 @@ _GX, _GW = np.polynomial.hermite_e.hermegauss(48)
 _GW = _GW / _GW.sum()
 
 
-def activation_size(path, name, inner):
-    """Estimated mean |activation| of each neuron of one layer (see the module text)."""
+def _mean_abs_gelu(mu, sd):
+    """Mean |gelu(z)| for z normal with these means and spreads."""
+    g = mu[:, None] + sd[:, None] * _GX[None, :]
+    return (np.abs(0.5 * g * (1 + _erf(g / np.sqrt(2)))) * _GW[None, :]).sum(1)
+
+
+def _gelu_moments(mu, sd):
+    """(mean, mean square) of gelu(z) for z normal with these means and spreads."""
+    g = mu[:, None] + sd[:, None] * _GX[None, :]
+    y = 0.5 * g * (1 + _erf(g / np.sqrt(2)))
+    return (y * _GW[None, :]).sum(1), (y * y * _GW[None, :]).sum(1)
+
+
+def _silu(x):
+    return x / (1 + np.exp(-x))
+
+
+# Anima draws a picture over timesteps from 1 (noise) down to 0; its blocks are read at a few of them and averaged
+ANIMA_TIMES = (0.97, 0.9, 0.8, 0.65, 0.45, 0.25)
+
+
+def anima_clock(path, prefix):
+    """What Anima's blocks are told about the time, at each of ANIMA_TIMES: [(embedding, the part of the modulation all
+    blocks share)], or None if the file has no such weights. As in ComfyUI's comfy/ldm/cosmos/predict2.py."""
     _, h = header(path)
-    p = PREFIX + name
+    need = [prefix + k for k in ("t_embedder.1.linear_1.weight", "t_embedder.1.linear_2.weight", "t_embedding_norm.weight")]
+    if any(k not in h for k in need):
+        return None
+    L1, L2, gn = (tensor(path, k).astype(np.float64) for k in need)
+    half = gn.shape[0] // 2
+    freq = np.exp(-np.log(10000) * np.arange(half) / half)
+    out = []
+    for t in ANIMA_TIMES:
+        ts = np.concatenate([np.cos(t * freq), np.sin(t * freq)])
+        out.append((ts / np.sqrt((ts ** 2).mean() + 1e-6) * gn, L2 @ _silu(L1 @ ts)))
+    return out
+
+
+def anima_block(path, prefix, name, W, clock):
+    """How one Anima block's feed-forward runs, from the weights: (mean activation of each neuron, its variance, the
+    gate on the block's output, the size of the block's whole output).
+
+    A block has no bias, but it shifts and scales the input of its feed-forward and gates its output by the timestep
+    (adaLN):  in = LayerNorm(x) * (1 + scale_t) + shift_t,  out = gate_t * (W @ gelu(W1 @ in)).  LayerNorm's output is
+    about unit-normal, so neuron i's pre-activation is about normal(W1_i . shift_t, |W1_i * (1 + scale_t)|).
+    The size of the whole output is its root mean square, counting the neurons as independent."""
+    _, h = header(path)
+    p = prefix + name
+    W1 = tensor(path, p + ".mlp.layer1.weight").astype(np.float64)
+    dim = W.shape[0]
+    mods = []
+    A, B = p + ".adaln_modulation_mlp.1.weight", p + ".adaln_modulation_mlp.2.weight"
+    if clock and A in h and B in h:
+        A, B = tensor(path, A).astype(np.float64), tensor(path, B).astype(np.float64)
+        for emb, shared in clock:
+            mod = B @ (A @ _silu(emb))
+            mods.append(np.split(mod + shared if shared.shape == mod.shape else mod, 3))
+    else:  # a file without the timestep weights: as if the block did not modulate
+        mods.append((np.zeros(dim), np.zeros(dim), np.ones(dim)))
+    e = np.zeros(W1.shape[0])
+    e2, var, gate = e.copy(), e.copy(), np.zeros(dim)
+    for shift, scale, g in mods:
+        et, e2t = _gelu_moments(W1 @ shift, np.sqrt(((W1 * (1 + scale)[None, :]) ** 2).sum(1)) + 1e-9)
+        e += et / len(mods)
+        e2 += e2t / len(mods)
+        var += np.maximum(e2t - et * et, 0) / len(mods)
+        gate += g / len(mods)
+    unit = float(np.sqrt(((np.linalg.norm(gate[:, None] * W, axis=0) ** 2) * e2).sum()))
+    return e.astype(np.float32), var.astype(np.float32), gate.astype(np.float32), unit
+
+
+def text_unit(path, prefix, name, W):
+    """The size of the whole output of one block of Anima's text adapter (as anima_block's, without a gate)."""
+    need = [prefix + name + k for k in (".mlp.0.weight", ".mlp.0.bias", ".norm_mlp.weight")]
+    W0, b0, gam = (tensor(path, k).astype(np.float64) for k in need)
+    _, e2 = _gelu_moments(b0, np.sqrt(((W0 * gam[None, :]) ** 2).sum(1)) + 1e-9)
+    return float(np.sqrt(((np.linalg.norm(W, axis=0) ** 2) * e2).sum()))
+
+
+def activation_size(path, family, prefix, name, inner):
+    """Estimated mean |activation| of each neuron of one layer (see the module text); None if it can't be made."""
+    _, h = header(path)
+    p = prefix + name
+    if family == "anima":
+        if not name.startswith("llm_adapter."):
+            return np.ones(inner, np.float32)       # a block's push is a factor
+        need = [p + ".mlp.0.weight", p + ".mlp.0.bias", p + ".norm_mlp.weight"]
+        if any(k not in h for k in need):
+            return None
+        W0, b0, gam = (tensor(path, k).astype(np.float64) for k in need)
+        if W0.shape[0] != inner:
+            return None
+        sd = np.sqrt(((W0 * gam[None, :]) ** 2).sum(1)) + 1e-9   # the input is RMS-normed: each coordinate about gam
+        return _mean_abs_gelu(b0, sd).astype(np.float32)
     need = [p + ".ff.net.0.proj.weight", p + ".ff.net.0.proj.bias", p + ".norm3.weight", p + ".norm3.bias"]
     if any(k not in h for k in need):
         return None
@@ -123,9 +206,7 @@ def activation_size(path, name, inner):
     mu_a, sd_a, mu_g, sd_g = mu[:inner], sd[:inner], mu[inner:], sd[inner:]
     z = mu_a / sd_a
     e_a = sd_a * np.sqrt(2 / np.pi) * np.exp(-z * z / 2) + mu_a * _erf(z / np.sqrt(2))  # mean |a| of a normal
-    g = mu_g[:, None] + sd_g[:, None] * _GX[None, :]
-    e_g = (np.abs(0.5 * g * (1 + _erf(g / np.sqrt(2)))) * _GW[None, :]).sum(1)          # mean |gelu(gate)|
-    return (e_a * e_g).astype(np.float32)
+    return (e_a * _mean_abs_gelu(mu_g, sd_g)).astype(np.float32)                        # x mean |gelu(gate)|
 
 
 def _kmeans(X, k, rng, rounds=12):
@@ -145,7 +226,9 @@ def _kmeans(X, k, rng, rounds=12):
 
 def build(path, tick=lambda done, of: None):
     """Read the checkpoint and work everything out. tick(done, of) reports progress per layer."""
-    L = layers(path)
+    M = model(path)
+    L, fam, prefix = M["layers"], M["family"], M["prefix"]
+    wkeys = families.per_layer(fam, prefix, [n for n, _, _ in L])["wkey"]
     inner = [n for _, n, _ in L]
     off = np.concatenate([[0], np.cumsum(inner)]).astype(np.int64)
     N = int(off[-1])
@@ -154,19 +237,30 @@ def build(path, tick=lambda done, of: None):
     g1 = np.zeros(N, np.int32)
     g2 = np.zeros(N, np.int32)
     n1 = n2 = 0
+    # Anima only: a card's strength is counted against its block's whole output (see anima_block and engine.py)
+    sized = fam == "anima"
+    act, var = (np.zeros(N, np.float32), np.zeros(N, np.float32)) if sized else (None, None)
+    gate = np.zeros((len(L), max(d for _, _, d in L)), np.float32) if sized else None
+    unit = np.zeros(len(L), np.float32)
+    clock = anima_clock(path, prefix) if sized else None
     for li, (name, n, _dim) in enumerate(L):
         a, b = int(off[li]), int(off[li + 1])
-        W = tensor(path, f"{PREFIX}{name}.ff.net.2.weight")          # (width, neurons): column i = what neuron i writes
+        W = tensor(path, wkeys[li])                                  # (width, neurons): column i = what neuron i writes
         X = np.ascontiguousarray((W / (np.linalg.norm(W, axis=0, keepdims=True) + 1e-9)).T)  # unit rows, one per neuron
-        est = activation_size(path, name, n)
+        est = activation_size(path, fam, prefix, name, n)
         absB[a:b] = est if est is not None else 0.0
-        S = X @ X.T
-        np.fill_diagonal(S, -2.0)
+        if sized and name.startswith("blocks."):
+            act[a:b], var[a:b], gate[li, :W.shape[0]], unit[li] = anima_block(path, prefix, name, W, clock)
+        elif sized and est is not None:
+            unit[li] = text_unit(path, prefix, name, W)
         k = min(KNN, n - 1)
-        top = np.argpartition(-S, k - 1, axis=1)[:, :k]
-        order = np.argsort(-np.take_along_axis(S, top, 1), axis=1)
-        knn[a:b, :k] = np.take_along_axis(top, order, 1) + a
-        del S
+        for r0 in range(0, n, 2048):                                 # in slices: a wide layer's full table is 250 MB
+            S = X[r0:r0 + 2048] @ X.T
+            S[np.arange(len(S)), np.arange(r0, r0 + len(S))] = -2.0  # not its own neighbour
+            top = np.argpartition(-S, k - 1, axis=1)[:, :k]
+            order = np.argsort(-np.take_along_axis(S, top, 1), axis=1)
+            knn[a + r0:a + r0 + len(S), :k] = np.take_along_axis(top, order, 1) + a
+            del S
         rng = np.random.default_rng(1000 + li)
         c1 = _kmeans(X, max(2, round(n / 1000)), rng)
         g1[a:b] = c1 + n1
@@ -180,12 +274,17 @@ def build(path, tick=lambda done, of: None):
         absB[~ok] = float(np.median(absB[ok])) if ok.any() else 0.05
     layer = np.repeat(np.arange(len(L)), inner).astype(np.int16)
     idx = (np.arange(N) - off[layer]).astype(np.int32)
-    return {"names": [n for n, _, _ in L], "inner": inner, "off": off, "n": N, "layer": layer, "idx": idx,
-            "absB": absB, "knn": knn, "g1": g1, "g2": g2}
+    out = {"family": fam, "prefix": prefix, "names": [n for n, _, _ in L], "inner": inner, "off": off, "n": N,
+           "layer": layer, "idx": idx, "absB": absB, "knn": knn, "g1": g1, "g2": g2, "unit": unit}
+    if sized:
+        out.update(act=act, var=var, gate=gate)
+    return out
 
 
 def _finish(st):
-    st["blocks"] = [n.split(".transformer")[0] for n in st["names"]]
+    """Add what follows from the family and the layer names: per layer, the weight to read, the LoRA key, the kind of
+    push, the suit and the starting strengths (see families.py)."""
+    st.update(families.per_layer(st["family"], st["prefix"], st["names"]))
     return st
 
 
@@ -196,11 +295,18 @@ def cache_file(path):
 
 
 def _load(f):
-    z = np.load(f, allow_pickle=False)
-    names = json.loads(str(z["names"]))
-    inner = [int(x) for x in z["inner"]]
-    return _finish({"names": names, "inner": inner, "off": z["off"].astype(np.int64), "n": int(z["off"][-1]),
-                    "layer": z["layer"], "idx": z["idx"], "absB": z["absB"], "knn": z["knn"], "g1": z["g1"], "g2": z["g2"]})
+    with np.load(f, allow_pickle=False) as z:  # closed before returning: an open file can't be replaced on Windows
+        names = json.loads(str(z["names"]))
+        inner = [int(x) for x in z["inner"]]
+        fam = str(z["family"]) if "family" in z.files else "sdxl"      # files kept from before Anima are all SDXL
+        prefix = str(z["prefix"]) if "prefix" in z.files else families.SDXL_PREFIX
+        st = {"family": fam, "prefix": prefix,
+              "names": names, "inner": inner, "off": z["off"].astype(np.int64), "n": int(z["off"][-1]),
+              "layer": z["layer"], "idx": z["idx"], "absB": z["absB"], "knn": z["knn"], "g1": z["g1"], "g2": z["g2"],
+              "unit": z["unit"] if "unit" in z.files else np.zeros(len(names), np.float32)}
+        if fam == "anima":  # KeyError on a file kept before these were worked out: it is read again
+            st.update(act=z["act"], var=z["var"], gate=z["gate"])
+    return _finish(st)
 
 
 def _work(path, key, f):
@@ -209,8 +315,10 @@ def _work(path, key, f):
         st = build(path, lambda done, of: s.update(p=round(done / of, 3)))
         Path(CACHE).mkdir(parents=True, exist_ok=True)
         tmp = f.with_name(f.stem + ".tmp.npz")
-        np.savez(tmp, names=np.array(json.dumps(st["names"])), inner=np.array(st["inner"]), off=st["off"], layer=st["layer"],
-                 idx=st["idx"], absB=st["absB"], knn=st["knn"], g1=st["g1"], g2=st["g2"])
+        np.savez(tmp, family=np.array(st["family"]), prefix=np.array(st["prefix"]),
+                 names=np.array(json.dumps(st["names"])), inner=np.array(st["inner"]), off=st["off"], layer=st["layer"],
+                 idx=st["idx"], absB=st["absB"], knn=st["knn"], g1=st["g1"], g2=st["g2"],
+                 **{k: st[k] for k in ("unit", "act", "var", "gate") if k in st})
         os.replace(tmp, f)
         s.update(stats=_finish(st), p=1.0)
     except Exception as e:  # noqa: BLE001
@@ -219,8 +327,8 @@ def _work(path, key, f):
 
 def state(path):
     """Where this checkpoint's numbers are: {"ready", "p", "error"}. Starts reading it if nobody has yet.
-    Raises ValueError at once if the file is not an SDXL checkpoint."""
-    layers(path)
+    Raises ValueError at once if the file is not a model we know."""
+    model(path)
     key, f = cache_file(path)
     with _lock:
         s = _state.get(key)
@@ -234,8 +342,11 @@ def state(path):
             if f.exists():
                 try:
                     s.update(stats=_load(f), p=1.0)
-                except Exception:  # noqa: BLE001  a damaged cache file: read the checkpoint again
-                    f.unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001  a damaged or outdated cache file: read the checkpoint again
+                    try:
+                        f.unlink(missing_ok=True)
+                    except OSError:
+                        pass  # still open somewhere: the new reading replaces it when it is done
             if s["stats"] is None:
                 threading.Thread(target=_work, args=(path, key, f), daemon=True, name="read-checkpoint").start()
     return {"ready": s["stats"] is not None, "p": s["p"], "error": s["error"]}
