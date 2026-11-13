@@ -30,8 +30,10 @@ SDXL_LAYERS = 70
 SDXL_STYLE = ("output_blocks.0.1", "output_blocks.1.1", "output_blocks.2.1")
 SDXL_DETAIL = ("output_blocks.3.1", "output_blocks.4.1", "output_blocks.5.1")
 
-ANIMA_BLOCK = re.compile(r"^(model\.diffusion_model\.)?(blocks\.(\d+))\.mlp\.layer2\.weight$")
-ANIMA_TEXT = re.compile(r"^(model\.diffusion_model\.)?(llm_adapter\.blocks\.(\d+))\.mlp\.2\.weight$")
+# Anima files name their tensors with different leading parts: "model.diffusion_model." (ComfyUI's own saves),
+# "net." (the base release, as its trainer saved it) or nothing. Whatever stands in front is the file's prefix.
+ANIMA_BLOCK = re.compile(r"^((?:\w+\.)*?)(blocks\.(\d+))\.mlp\.layer2\.weight$")
+ANIMA_TEXT = re.compile(r"^((?:\w+\.)*?)(llm_adapter\.blocks\.(\d+))\.mlp\.2\.weight$")
 
 # How strong a fresh card of 1 / 10 / 100 / 1000 neurons starts ("Card strength" in the page scales all of them; a
 # deal at the default settings plays cards at about a quarter to four fifths of this).
@@ -82,7 +84,7 @@ def read(header, filename):
             part = {"input_blocks": 0, "middle_block": 1, "output_blocks": 2}[m.group(2)]
             sdxl.append(((part, int(m.group(3) or 0), int(m.group(4)), int(m.group(5))), m.group(1), t["shape"][1], t["shape"][0]))
             continue
-        m = ANIMA_BLOCK.match(k) or ANIMA_TEXT.match(k)
+        m = ANIMA_TEXT.match(k) or ANIMA_BLOCK.match(k)
         if m:
             prefix = m.group(1) or ""
             (blocks if m.group(2).startswith("blocks") else text).append((int(m.group(3)), m.group(2), t["shape"][1], t["shape"][0]))

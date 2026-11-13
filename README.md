@@ -144,9 +144,12 @@ blocks read. Its 28 blocks have **no biases at all**, so the SDXL push has nothi
   nodes, gave the card's picture exactly; at strength 0 it gave the plain picture.
 - Reading the checkpoint takes about 70 seconds. A picture at 512×688 and 16 steps takes about 4 seconds on an
   RTX 3080 Ti, a deal of nine about 35.
-- Not tried on Anima: any other Anima checkpoint (the base and preview releases), an Anima checkpoint that holds
-  the text encoder and VAE in one file, the few-step turbo LoRA together with cards, and how a look made at 512×688
-  holds up at 1024×1024.
+- **The base release** (anima-base-v1.0) names its tensors `net.…` where the other files say
+  `model.diffusion_model.…`; any leading name is accepted. It was read and one deal of four was drawn on it: four
+  whole pictures, each different from the plain one. The strengths were measured on the aesthetic checkpoint only.
+- Not tried on Anima: the preview releases, the turbo checkpoint and the few-step turbo LoRA (they want few steps
+  and CFG 1, which you would have to set under **Table**), an Anima checkpoint that holds the text encoder and VAE in
+  one file, and how a look made at 512×688 holds up at 1024×1024.
 - Neighbours and groups come from write directions, not from what neurons fire on, so a card is named by where it
   sits (Style, Layout, Detail) and recognised by its emblem rather than by a tag.
 - Tried and not used: reading a word for each neuron straight from the weights (word vector → the block's

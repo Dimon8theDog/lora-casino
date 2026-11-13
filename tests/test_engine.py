@@ -207,13 +207,16 @@ class Anima(Game, unittest.TestCase):
         t, _ = engine.lora_tensors(St, [engine.ingredient(St, rng, 0.5, self.kn) for _ in range(4)], self.dir / "noclock.safetensors")
         self.assertTrue(all(np.isfinite(v).all() for v in t.values()))
 
-    def test_a_file_saved_with_bare_names_is_anima_too(self):
-        bare = fake_checkpoint.write_anima(self.dir / "bare.safetensors", prefix="")
-        m = weights.model(bare)
-        self.assertEqual((m["family"], m["prefix"]), ("anima", ""))
-        St = weights._finish(weights.build(bare))
-        self.assertTrue(all(not k.startswith("model.") for k in St["wkey"]))
-        self.assertEqual(St["lora"], self.St["lora"], "the LoRA keys are the same either way")
+    def test_a_file_that_names_its_tensors_another_way_is_anima_too(self):
+        # "net." is how the Anima base release names them; "" is a file saved with bare names
+        for prefix in ("net.", "", "some.other.wrapper."):
+            f = fake_checkpoint.write_anima(self.dir / f"named_{len(prefix)}.safetensors", prefix=prefix)
+            m = weights.model(f)
+            self.assertEqual((m["family"], m["prefix"], len(m["layers"])), ("anima", prefix, 12), prefix)
+            St = weights._finish(weights.build(f))
+            self.assertTrue(all(k.startswith(prefix + ("blocks." if i >= 3 else "llm_adapter.")) for i, k in enumerate(St["wkey"])), prefix)
+            self.assertEqual(St["lora"], self.St["lora"], "the LoRA keys are the same either way: ComfyUI names the loaded model's layers itself")
+            self.assertTrue(np.allclose(St["unit"], self.St["unit"], rtol=1e-4), "and so are the numbers, timestep weights included")
 
     def test_one_neuron_in_a_block_is_made_exactly_louder(self):
         St = self.St
