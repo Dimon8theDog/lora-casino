@@ -1,7 +1,7 @@
 [project]
 name = "lora-casino"
 description = "Deal pictures, take the one you like, and cash its hand out as a LoRA. For SDXL checkpoints and Anima, no training."
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 # numpy is the only thing it needs, and ComfyUI already has it

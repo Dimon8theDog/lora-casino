@@ -22,7 +22,7 @@ import numpy as np
 
 from . import families, host, weights
 from .engine import (clean_mix, deck, describe, knobs, mix_key, move_weights, mutate, png_with_text, polish, recipe_text,
-                     write_lora, KNOBS)
+                     suit, write_lora, KNOBS)
 from .host import (CID, PREVIEW, ComfyDown, _live, comfy, comfy_try, find_comfy, list_models, live, live_start,
                    lora_dir, model_file, set_settings, settings)
 
@@ -41,10 +41,10 @@ def configure(data_dir, page_dir, own_url=None, folders=None):
 LORA_SUB = "LoRACasino"        # the folder inside ComfyUI's loras folder
 
 
-TEMP_SUB = "_temp"             # LoRACasino/_temp: the throwaway LoRAs of each step
+TEMP_SUB = "_temp"             # LoRACasino/_temp: the throwaway LoRA of each picture, there only while it is drawn
 
 
-KEEP_TEMP = 40
+STALE_TEMP = 900               # a throwaway nobody here is using goes once it is this old (seconds)
 
 
 QUALITY = {"breed": {"width": 512, "height": 688, "steps": 12}, "full": {"width": 768, "height": 1024, "steps": 20}}
@@ -186,26 +186,58 @@ def workflow(prompt, seed, s, M, lora_name=None):
     return g
 
 
+# Throwaway LoRAs sit in ComfyUI's loras folder, because that is the only place ComfyUI loads one from. Left there
+# they fill every LoRA list and picker with numbered files, so each is deleted as soon as its pictures are drawn.
+_temp_lock = threading.Lock()
+_temp_use = {}      # lora_name -> [file, how many pictures still to be drawn need it]
+_temp_done = set()  # files finished with that could not be deleted yet (Windows: ComfyUI still has the file open)
+
+
 def temp_lora(St, mix, M):
-    """Write (once) the throwaway LoRA for a mix on model M; -> its ComfyUI lora_name."""
-    name = f"c_{mix_key(St, mix)}_{M['tag']}.safetensors"
-    lf = lora_dir() / LORA_SUB / TEMP_SUB / name
-    if not lf.exists():
-        write_lora(lf, St, mix, M["path"])
-    return f"{LORA_SUB}{os.sep}{TEMP_SUB}{os.sep}{name}"
+    """Write the throwaway LoRA for a mix on model M (unless it is there) and count one more picture that needs it.
+    -> its ComfyUI lora_name. Hand the name to drop_temp() once the picture is drawn, has failed or was dropped."""
+    file = f"c_{mix_key(St, mix)}_{M['tag']}.safetensors"
+    lf = lora_dir() / LORA_SUB / TEMP_SUB / file
+    name = f"{LORA_SUB}{os.sep}{TEMP_SUB}{os.sep}{file}"
+    with _temp_lock:
+        if not lf.exists():
+            write_lora(lf, St, mix, M["path"])
+        _temp_done.discard(lf)
+        _temp_use.setdefault(name, [lf, 0])[1] += 1
+    return name
+
+
+def drop_temp(names):
+    """The pictures these throwaway LoRAs were written for are finished with: delete each one that no other picture
+    is still waiting for."""
+    with _temp_lock:
+        for n in names:
+            u = _temp_use.get(n)
+            if u:
+                u[1] -= 1
+                if u[1] <= 0:
+                    _temp_done.add(_temp_use.pop(n)[0])
+    tidy_temp()
 
 
 def tidy_temp():
+    """Delete the throwaways that are finished with, and any left behind (a stopped server, an older version) once
+    they are STALE_TEMP old. The ones pictures here still wait for stay."""
     try:
         d = lora_dir() / LORA_SUB / TEMP_SUB
     except ComfyDown:
         return
-    files = sorted(d.glob("c_*.safetensors"), key=lambda p: p.stat().st_mtime, reverse=True)
-    for p in files[KEEP_TEMP:]:
-        try:
-            p.unlink()
-        except OSError:
-            pass
+    with _temp_lock:
+        busy = {u[0] for u in _temp_use.values()}
+        for p in list(d.glob("c_*.safetensors")):
+            if p in busy:
+                continue
+            try:
+                if p in _temp_done or time.time() - p.stat().st_mtime > STALE_TEMP:
+                    p.unlink()
+                    _temp_done.discard(p)
+            except OSError:  # still open in ComfyUI (it keeps the last LoRA it loaded): the next tidy takes it
+                pass
 
 
 def card_key(St, mix, prompt, seed, q, M):
@@ -279,10 +311,12 @@ def generate(job, St, mix, prompt, seed, q, M):
         job.update(base=bkey, pid=None)
         if mix:
             lora = temp_lora(St, mix, M)
-            tidy_temp()
-            job.update(state="drawing the pushed picture")
-            pkey = card_key(St, mix, prompt, seed, q, M)
-            render(workflow(prompt, seed, q, M, lora), pkey, job)
+            try:
+                job.update(state="drawing the pushed picture")
+                pkey = card_key(St, mix, prompt, seed, q, M)
+                render(workflow(prompt, seed, q, M, lora), pkey, job)
+            finally:
+                drop_temp([lora])
             job.update(push=pkey)
         job.update(state="done", secs=round(time.time() - t0, 1))
     except Exception as e:  # noqa: BLE001
@@ -312,6 +346,14 @@ def cancel_round(r):
 
 
 def run_round(r):
+    r["temps"] = []  # the throwaway LoRAs this round's pictures are drawn with
+    try:
+        draw_round(r)
+    finally:
+        drop_temp(r["temps"])
+
+
+def draw_round(r):
     St, M = r["stats"], r["model"]
     try:
         for c in r["cards"]:  # queue everything first so ComfyUI draws them back to back
@@ -321,8 +363,9 @@ def run_round(r):
                 c["ready"] = True
                 continue
             lora = temp_lora(St, c["mix"], M) if c["mix"] else None
+            if lora:
+                r["temps"].append(lora)
             c["pid"] = queue(workflow(r["prompt"], r["seed"], r["q"], M, lora))
-        tidy_temp()
     except Exception as e:  # noqa: BLE001  (could not even queue: ComfyUI down or refused)
         r["error"] = str(e)
         return
@@ -359,7 +402,8 @@ def breed(body):
     seed = int(body.get("seed", 6100)) % (2 ** 48)
     wild = min(1.0, max(0.0, float(body.get("wild", 0.5))))
     kn = knobs(body, M["family"])
-    n = 4 if int(body.get("n", 8)) == 4 else 8
+    n = int(body.get("n", 8))
+    n = n if n in (4, 5, 8) else 8  # new pictures a deal: nine in a square, a cross of four, six packed large
     q = size_from(body, "breed")
     rng = np.random.default_rng()
     cid = str(body.get("client", ""))[:40]
@@ -413,11 +457,39 @@ def safe_name(s):
     return re.sub(r"[^\w.+-]+", "_", s).strip("._")[:70] or "look"
 
 
-def save(St, mix, name, prompt, seed, rkey, M, qs):
+def hand_words(St, mix):
+    """A hand in a few words, for LoRA browsers that show a description: 'Style up (strong), Detail down (gentle)'."""
+    return ", ".join(f"{suit(St, m).capitalize()} {'up' if m['s'] > 0 else 'down'} ({describe(St, m)['power']})" for m in mix)
+
+
+def free_name(folder, name, recipe):
+    """A name nobody typed must not replace another look: the same look keeps its name, a different one that would
+    get the same name gets a number after it."""
+    n, k = name, 1
+    while True:
+        f = folder / f"{n}.json"
+        if not f.exists() and not (folder / f"{n}.safetensors").exists():
+            return n
+        try:
+            if json.loads(f.read_text(encoding="utf-8")).get("recipe") == recipe:
+                return n
+        except (OSError, ValueError):
+            pass
+        k += 1
+        n = f"{name}_{k}"
+
+
+def save(St, mix, name, prompt, seed, rkey, M, qs, auto=False):
+    """Cash a hand out: the LoRA, its picture (<name>.preview.png, which LoRA browsers show) and its recipe, into
+    ComfyUI's loras/LoRACasino. auto = the name is the page's suggestion, not one the player typed."""
     name = "casino_" + safe_name(name)
+    dst = lora_dir() / LORA_SUB
+    if auto:
+        name = free_name(dst, name, recipe_text(St, mix))
     lf = SAVED / f"{name}.safetensors"
     lora_name = f"{LORA_SUB}{os.sep}{lf.name}"
     rec = {"name": name, "made_by": "LoRA Casino", "made": time.strftime("%Y-%m-%d %H:%M:%S"),
+           "description": f"{hand_words(St, mix)} · made on {Path(M['ckpt'].replace(chr(92), '/')).stem}",
            "mix": [{k: m[k] for k in ("label", "kind", "s")} | {"neurons": len(m["ids"])} for m in mix],
            "recipe": recipe_text(St, mix),
            "checkpoint": M["ckpt"], "family": M["family"], "vae": M["vae"] or "(the checkpoint's own)",
@@ -434,7 +506,6 @@ def save(St, mix, name, prompt, seed, rkey, M, qs):
         (SAVED / f"{name}.preview.png").write_bytes(png_with_text(pic.read_bytes(), {
             "prompt": json.dumps(workflow(prompt, seed, qs, M, lora_name)), "loracasino": json.dumps(rec)}))
     (SAVED / f"{name}.json").write_text(json.dumps(rec, indent=1), encoding="utf-8")
-    dst = lora_dir() / LORA_SUB
     dst.mkdir(parents=True, exist_ok=True)
     for ext in (".safetensors", ".preview.png", ".json"):
         if (SAVED / f"{name}{ext}").exists():
@@ -558,7 +629,7 @@ def post(path, body):
             return 200, {"job": jid}
         if not mix:
             return 400, {"error": "Nothing is pushed in this one"}
-        return 200, save(St, mix, str(body.get("name", "")), prompt, seed, str(body.get("render", "")), M, q)
+        return 200, save(St, mix, str(body.get("name", "")), prompt, seed, str(body.get("render", "")), M, q, bool(body.get("auto")))
     except Reading as e:
         return 409, {"error": str(e), "reading": True}
     except ComfyDown as e:

@@ -6,7 +6,7 @@ one checkpoint.
 
 https://github.com/user-attachments/assets/ec3d6ebf-ee75-4648-bbec-839cacb9da8c
 
-It plays like a card table. Each deal lays out the same prompt nine times (or four). Every picture plays a different
+It plays like a card table. Each deal lays out the same prompt nine times (or six, or four). Every picture plays a different
 **hand**: a few **cards**, each of which pushes some of the model's neurons up or down. Take the picture you like and
 the next deal grows from its hand. A hand you like cashes out as a small LoRA (tens of kB) that ComfyUI loads like
 any other.
@@ -19,9 +19,10 @@ any other.
 | **Hold** / **Discard** | On each card in your hand. A held card is left alone by every deal; Discard drops the card and deals again. |
 | **Stakes** | Low: a deal changes one card a little. High: remixes and whole new hands, and more pictures that break. |
 | **Draw** / **Refine** | Draw deals new cards; Refine keeps the cards and changes them a little. |
+| **9** / **6** / **4** | How a deal is laid out: nine pictures in a square, six packed as large as the window has room for (one row, two or three, whichever makes them biggest), or four around your card. |
 | **Take back**, **Shuffle**, **Fold** | One card back; same hand with new starting noise; give up the hand. |
 | **Winnings**, **Trail** | Pictures you kept with the chip; the cards you took, in order. |
-| **Cash out as LoRA** | In a picture's close-up: saves its hand as a LoRA into ComfyUI. |
+| **Cash out as LoRA** | In a picture's close-up: saves its hand as a LoRA into ComfyUI, with the picture as its preview. The name box already holds a two-word name worked out from the hand; type over it for your own. |
 
 ## Install
 
@@ -60,8 +61,10 @@ writes LoRAs into ComfyUI's folder. Data goes to `data/` in this folder.
   - **Anima**: the model in `diffusion_models`, its text encoder (`qwen_3_06b_base`) in `text_encoders` and its VAE
     (`qwen_image_vae`) in `vae`, as ComfyUI's own Anima workflow has them. LoRA Casino picks those two by name; you
     can change them under **Table**.
-- It writes into ComfyUI's `loras/LoRACasino/` (looks you cashed out) and `loras/LoRACasino/_temp/` (the throwaway
-  LoRAs each deal is drawn with; the newest 40 are kept).
+- It writes into ComfyUI's `loras/LoRACasino/` (looks you cashed out: the LoRA, its picture as
+  `<name>.preview.png`, which LoRA browsers show, and its recipe) and `loras/LoRACasino/_temp/` (the throwaway LoRAs
+  a deal is drawn with; each is deleted once its picture is drawn, so they don't fill ComfyUI's LoRA list. On
+  Windows ComfyUI keeps the last one it loaded open, so one stays until the next deal).
 - Model, VAE, text encoder, negative prompt, steps, CFG, sampler and scheduler are set in the page, under **Table**.
   Each family starts with the settings its makers recommend and keeps its own: switching from SDXL to Anima and back
   does not mix them up. A hand belongs to one family, so switching family folds it.
